@@ -1,0 +1,20 @@
+---
+description: LightMq Browser Project Architecture & AI Memory Rules
+globs: **/*
+alwaysApply: true
+---
+
+# LightMq Browser Architecture Rules
+
+You are working on **LightMq**, a Python 3 + PySide6 + Qt WebEngine desktop browser with Chromium DevTools.
+
+## Required Agent Memory Protocol
+- **Read Memory First**: Check `.ai/memory/STATUS.md`, `.ai/memory/TODO.md`, and `.ai/memory/DECISIONS.md`.
+- **Update Memory**: Log task completions in `.ai/memory/COMPLETED.md` and `.ai/memory/SESSION_LOG.md`.
+
+## Architectural Boundaries
+- `src/browser/core/`: Pure browser state, lifecycle, tabs, and event bus.
+- `src/browser/ui/`: Qt widgets, toolbars, address bar, and themes. No direct WebEngine business logic.
+- `src/browser/webengine/`: Encapsulation of `QWebEngineView`, `QWebEnginePage`, profiles, and interceptors.
+- `src/browser/devtools/`: Dedicated Chromium Developer Tools subsystem.
+- `src/browser/features/`: Isolated feature plugins (bookmarks, history, private browsing, etc.).

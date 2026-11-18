@@ -1,0 +1,40 @@
+/* LightMq - Dark Theme QSS Scaffold */
+QMainWindow {
+    background-color: #202124;
+    color: #E8EAED;
+}
+
+QToolBar {
+    background: #292A2D;
+    border-bottom: 1px solid #3C4043;
+    spacing: 6px;
+    padding: 4px;
+}
+
+QLineEdit {
+    background-color: #35363A;
+    border: 1px solid transparent;
+    border-radius: 16px;
+    padding: 6px 14px;
+    color: #E8EAED;
+    selection-background-color: #8AB4F8;
+}
+
+QLineEdit:focus {
+    background-color: #202124;
+    border: 1px solid #8AB4F8;
+}
+
+QTabBar::tab {
+    background: #292A2D;
+    color: #9AA0A6;
+    padding: 8px 16px;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background: #35363A;
+    color: #E8EAED;
+}
