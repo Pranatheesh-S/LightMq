@@ -6,221 +6,256 @@ A customizable, developer-focused desktop web browser built with **Python**, **P
 
 ## Project Overview
 
-**LightMq** is an open-source desktop browser designed for developers, power users, and privacy-conscious browsing. Rather than relying on a monolithic architecture, LightMq separates browser engine controls, user interface components, and developer tooling into clean, modular layers.
+**LightMq** is an open-source desktop browser designed for developers, power users, and privacy-conscious web workflows. It separates browser rendering, presentation, and developer tooling into clean, modular layers.
 
 ### Rendering Architecture
-LightMq utilizes **Qt WebEngine**, which encapsulates the **Chromium** browser engine and Google V8 JavaScript runtime:
-- **Multi-Process Architecture**: Web content renders in isolated Chromium renderer processes, keeping rendering crashes independent from the main browser UI.
-- **Modern Web Standards**: Full support for HTML5, CSS3, modern JavaScript standards, WebGL, and media playback.
-- **Native Developer Tools Integration**: Direct access to Chromium's built-in remote debugging protocol and DevTools inspector.
-
-The goal of LightMq is to provide a clean, hackable, and extensible browser environment where developers can inspect web applications, manage custom network interceptors, automate browsing workflows, and customize UI themes without unnecessary browser bloat.
+LightMq uses **Qt WebEngine**, which embeds the **Chromium** browser engine and Google V8 JavaScript runtime:
+- **Multi-Process Architecture**: Web pages render in isolated Chromium worker processes for stability and sandboxing.
+- **Modern Web Standards**: Native rendering of HTML5, CSS3, modern ECMAScript, WebGL, and media.
+- **Genuine Chromium Developer Tools**: Built-in inspector (`devtools://devtools/bundled/inspector.html`) powered by `QWebEnginePage.setDevToolsPage()`.
 
 ---
 
-## Project Status
+## Current Status: Multi-Tab Browser with Built-in Chromium DevTools (Phase 2)
 
-> **Current State: Scaffolding & Initial Architecture**
-> 
-> The project is currently in the initial scaffolding and architecture definition phase. The folder structure, packaging configurations (`pyproject.toml`), and technical documentation have been established. Core browser runtime features, UI controls, and WebEngine bindings are scheduled for implementation starting in **Phase 1**.
+The browser is currently at the **Multi-Tab Browser** stage. Full tab lifecycle management (creation, closing, switching, reordering, independent navigation states, background tab isolation), URL navigation, Chromium rendering, and dynamic Chromium Developer Tools inspection across active tabs are fully functional and verified.
+
+---
+
+## Verified Engine Specifications
+
+The browser engine runs on the latest stable PySide6 and Qt WebEngine distribution available:
+
+| Subsystem | Verified Version | Notes |
+| :--- | :--- | :--- |
+| **Python Runtime** | `3.12.9` (64-bit) | Recommended `>=3.10` |
+| **PySide6 Framework** | `6.12.0` | Official Qt 6 Python bindings |
+| **Qt Core Library** | `6.12.0` | High-performance C++ application framework |
+| **Bundled Chromium** | `140.0.0.0` | High-performance multi-process rendering engine |
+| **PySide6-WebEngine** | `6.12.0.140` | Qt WebEngine binary package with bundled Chromium |
+| **Chromium DevTools** | Bundled v140 | Native Elements, Console, Network, and Sources panels |
+
+### Diagnostic Commands
+You can inspect the engine and runtime versions directly from the command line:
+
+```powershell
+# Display short version summary
+python src/browser/main.py --version
+
+# Display complete engine and environment diagnostics
+python src/browser/main.py --diagnostics
+```
+
+Alternatively, click the **About** button in the browser toolbar to view the live engine version dialog.
+
+---
+
+## Upstream Chromium Gap Analysis & Security Model
+
+### Understanding the Version Gap
+- **Bundled Chromium in Qt WebEngine**: Version **140.0.0.0** (via PySide6 6.12.0)
+- **Current Standalone Google Chrome**: Version **158.x**
+
+### Why Does This Gap Exist?
+1. **Upstream Chromium Rapid Release Cycle**: Google Chrome releases a new major version every 4 weeks.
+2. **Qt Stabilization & Synchronization**: The Qt Company synchronizes Qt WebEngine with specific Chromium LTS (Long Term Support) snapshots. Each snapshot requires stabilizing Chromium's multi-process IPC, GPU process, and network stack against Qt's cross-platform windowing (QPA) and event loop architecture.
+3. **Security Backports**: The Qt Company continuously backports upstream Chromium security fixes into supported Qt WebEngine releases without breaking ABI stability.
+
+### Important Engineering Constraints
+- **Do Not Replace Qt WebEngine Binaries with Chrome Binaries**: Qt WebEngine is not a standalone Chromium executable; it is compiled with deep C++ hooks into Qt's event loop, graphics pipeline, and type system. Swapping DLLs or binaries will cause immediate ABI crashes.
+- **No Fictitious User-Agent Spoofing**: LightMq does not spoof the User-Agent to falsely report a newer Chromium version, as this breaks feature detection on modern websites.
+- **Recommended Maintenance Path**: Keep PySide6 and PySide6-WebEngine updated to the latest minor releases using `pip install --upgrade PySide6`.
+
+---
+
+## Features
+
+### Currently Implemented (Phase 1 & Phase 2)
+- [x] **Multiple Tab Management (Phase 2)**:
+  - Chrome-style native tab bar positioned above the navigation toolbar (`QTabBar` + `QStackedWidget`).
+  - Open new tabs via the `+` button, `Ctrl+T`, or links opening in new windows (`target="_blank"`, `window.open()`).
+  - Close tabs via the tab `×` button or `Ctrl+W` shortcut with clean asynchronous `deleteLater()` memory cleanup.
+  - Closing the last remaining tab automatically creates a fresh start page tab, preventing an empty UI shell.
+  - Tab switching via click or keyboard navigation (`Ctrl+Tab` forward with wrap-around, `Ctrl+Shift+Tab` backward with wrap-around).
+  - Tab reordering via drag-and-drop with persistent viewport alignment.
+  - Independent navigation and history states: active tab synchronizes the Address Bar, Back/Forward button states, window title, and loading progress.
+  - Background tab isolation: background tabs never overwrite the active tab's toolbar, address bar, or window title.
+  - Dynamic tab titles and site favicons with automatic text elision.
+- [x] **URL Navigation & Normalization**:
+  - Address bar with keyboard submission (`Enter`).
+  - Automatic `https://` prefixing for domain names (e.g. `example.com` → `https://example.com`).
+  - Localhost development URL support (e.g. `localhost:8000` → `http://localhost:8000`).
+  - Full URL synchronization upon redirection or navigation (`urlChanged`).
+- [x] **Webpage Rendering (Chromium Backend)**:
+  - Real webpage loading and rendering powered by `QWebEngineView` and `QWebEnginePage`.
+  - Full JavaScript execution and page interaction.
+  - Page loading progress bar and status bar indicators.
+  - Dynamic window title updates based on active webpage `<title>`.
+- [x] **Navigation Controls**:
+  - Back (`←`), Forward (`→`), Reload (`↻`), and Stop (`✕`).
+  - Dynamic button enabling/disabling linked to page history.
+  - Dedicated "Go" navigation button.
+- [x] **Chromium Developer Tools (Inspect Element)**:
+  - Genuine Chromium DevTools attached via `QWebEnginePage.setDevToolsPage()`.
+  - Resizable panel docked on the right side using `QSplitter`.
+  - Seamless re-attachment across tab switches: inspecting follows the active tab automatically.
+  - Safe detachment when inspected tabs close.
+  - Toggle DevTools via `F12` key or the toolbar button.
+  - Right-click "Inspect" context menu support.
+  - Full access to built-in Elements, Console, Network, and Sources inspector tabs.
+  - Crash-proof open/close and tab-switch lifecycle.
+- [x] **Engine Diagnostics & About Dialog**:
+  - Live About dialog showing exact PySide6, Qt, and Chromium versions.
+  - Command-line `--version` and `--diagnostics` flags.
+
+### Planned Features (Future Phases)
+- [ ] **Bookmarks & History**: Local SQLite-backed bookmark hierarchy and searchable visit history.
+- [ ] **Download Manager**: File download interception, progress tracking, and download shelf.
+- [ ] **Session Restoration**: Automatic recovery of open tabs across browser restarts.
+- [ ] **Private Browsing (Incognito)**: Ephemeral in-memory profiles leaving no disk trace.
+- [ ] **Ad-Blocking & Privacy**: Network request interception for tracker and ad filtering.
+- [ ] **AI Assistant Sidecar**: Integrated copilot panel for page summarization and search.
 
 ---
 
 ## Technology Stack
 
 - **Python**: `3.12+` (Minimum `3.10+`)
-- **UI Toolkit**: [PySide6](https://wiki.qt.io/Qt_for_Python) (Official Qt 6 Python bindings)
-- **Rendering Engine**: [Qt WebEngine](https://doc.qt.io/qtforpython-6/PySide6/QtWebEngineWidgets/index.html) (Chromium backend)
-- **Styling**: Qt Style Sheets (QSS) for light and dark themes
-- **Storage (Planned)**: SQLite for history, bookmarks, user settings, and cache management
-- **Testing**: [pytest](https://docs.pytest.org/) and `pytest-qt` for GUI and component testing
+- **UI Framework**: [PySide6](https://wiki.qt.io/Qt_for_Python) (`>=6.12.0`)
+- **Rendering Engine**: [Qt WebEngine](https://doc.qt.io/qtforpython-6/PySide6/QtWebEngineWidgets/index.html) (Chromium 140 backend)
+- **Testing**: [pytest](https://docs.pytest.org/)
 
 ---
 
-## Features
+## Keyboard Shortcuts
 
-### Currently Implemented
-- **Project Scaffolding**: Modular directory structure separating core engine, UI, WebEngine, DevTools, storage, and features.
-- **Packaging & Dependencies Configuration**: Configured `pyproject.toml` with packaging metadata and optional development dependencies.
-- **Theme Scaffolding**: Base QSS definitions for light and dark themes (`src/browser/ui/themes/`).
-- **Architecture & Design Documentation**: Technical specifications in `docs/` detailing architecture, security design, and development roadmaps.
+| Shortcut | Action |
+| :--- | :--- |
+| **`Ctrl + T`** | Open new tab |
+| **`Ctrl + W`** | Close current tab |
+| **`Ctrl + Tab`** | Switch to next tab (forward cycle with wrap-around) |
+| **`Ctrl + Shift + Tab`** | Switch to previous tab (backward cycle with wrap-around) |
+| **`Ctrl + L`** | Focus Address Bar and select all text |
+| **`Enter`** | Navigate to address typed in the Address Bar |
+| **`Ctrl + R` / `F5`** | Reload active tab |
+| **`Alt + Left`** | Navigate Back |
+| **`Alt + Right`** | Navigate Forward |
+| **`Esc`** | Stop loading active tab |
+| **`F12`** | Toggle Chromium Developer Tools (Inspect Element) for active tab |
 
-### Planned Features
-- **Tabbed Browsing**: Multi-tab management with draggable, closeable, and pinnable tabs (`core/tab_manager.py`, `ui/tab_bar.py`).
-- **Navigation & Omnibox**: URL bar with search query parsing, navigation controls (Back, Forward, Reload, Home), and SSL security indicators (`ui/address_bar.py`).
-- **Built-in Developer Tools (Inspect Element)**: Chromium DevTools protocol integration, dockable inspector panel, and right-click "Inspect Element" action (`devtools/`).
-- **Advanced Developer Panels**: Custom DOM tree visualizer, live CSS rule inspector, JS console bridge, and network traffic monitor (`devtools/`).
-- **Bookmarks & History**: Hierarchical bookmark manager and searchable browsing history backed by SQLite (`features/bookmarks/`, `features/history/`).
-- **Download Management**: File download interception, progress monitoring, and download shelf (`webengine/download_handler.py`).
-- **Privacy & Security**: Ephemeral private browsing (Incognito) using in-memory profiles, granular web permissions, and URL validation (`features/private_browsing/`, `security/`).
-- **Content Filtering**: Request interceptor for network-level ad and tracker blocking (`features/ad_blocking/`).
-- **AI Assistant Sidecar**: Collapsible assistant sidebar for webpage summarization and contextual tasks (`features/ai_assistant/`).
+---
+
+## Installation & Setup
+
+### 1. Requirements
+- **Windows 10 / 11** (Linux and macOS compatible)
+- **Python 3.10+** (Python 3.12 recommended)
+
+### 2. Set Up Virtual Environment
+```powershell
+# Navigate to the repository
+cd LightMq
+
+# Create virtual environment
+python -m venv .venv
+
+# Activate virtual environment
+.venv\Scripts\activate
+```
+
+### 3. Install Dependencies
+```powershell
+pip install -e .[dev]
+```
+*Or install runtime dependencies directly:*
+```powershell
+pip install "PySide6>=6.12.0"
+```
+
+### 4. Updating the Engine
+To ensure your browser runs the newest compatible Chromium engine supported by PySide6:
+```powershell
+pip install --upgrade PySide6
+```
+
+### 5. Run the Browser
+```powershell
+# Launch browser (opens default page https://example.com)
+python src/browser/main.py
+
+# Launch browser with a custom target URL
+python src/browser/main.py https://github.com
+python src/browser/main.py localhost:8000
+
+# View engine diagnostics
+python src/browser/main.py --diagnostics
+```
 
 ---
 
 ## Project Architecture
 
-LightMq enforces strict separation of concerns across dedicated modules within `src/browser/`:
-
 ```text
-LightMq/
-│
-├── pyproject.toml             # Project packaging, metadata, and dependencies
-├── README.md                  # Project overview and developer documentation
-├── LICENSE                    # MIT License
-├── .gitignore                 # Version control exclusions
-├── .env.example               # Environment variable templates
-│
-├── src/
-│   └── browser/               # Main application package
-│       ├── main.py            # Application entry point (Planned)
-│       ├── core/              # State management, tab models, navigation, EventBus
-│       ├── ui/                # PySide6 widgets, main window, address bar, themes
-│       ├── webengine/         # Qt WebEngine / Chromium encapsulation and profiles
-│       ├── devtools/          # Chromium DevTools inspector, DOM, console, network
-│       ├── features/          # Pluggable features (bookmarks, history, adblock, etc.)
-│       ├── storage/           # SQLite database, schema migrations, repositories
-│       ├── security/          # URL validator, certificate handler, permission policy
-│       ├── services/          # Search suggestions, favicon caching, update service
-│       └── utils/             # Logging, filesystem paths, constants
-│
-├── assets/                    # Static resources (icons, graphics)
-├── tests/                     # Test suite (unit, integration, e2e)
-├── docs/                      # Technical documentation
-├── scripts/                   # Utility and maintenance scripts
-└── packaging/                 # Distribution recipes (Windows, Linux, macOS)
+src/browser/
+├── main.py                    # Application initialization & CLI entry point
+├── core/
+│   ├── navigation.py          # URL normalization & validation logic
+│   ├── tab_manager.py         # Tab collection management & lifecycle signals
+│   ├── browser_context.py     # Application context (Phase 3)
+│   └── event_bus.py           # Decoupled event dispatcher (Phase 3)
+├── ui/
+│   ├── main_window.py         # Main browser window, toolbar, tab bar, and splitter layout
+│   ├── tab_bar.py             # Custom QTabBar wrapper with '+' button and close buttons
+│   └── address_bar.py         # Custom QLineEdit address bar
+├── webengine/
+│   ├── web_view.py            # QWebEngineView wrapper
+│   └── web_page.py            # QWebEnginePage configuration, window open handler & SSL handling
+├── devtools/
+│   ├── devtools_manager.py    # DevTools attachment, dynamic re-targeting & toggle coordinator
+│   └── devtools_panel.py      # Resizable DevTools container widget
+└── utils/
+    ├── constants.py           # Engine metadata, diagnostics & constants
+    └── paths.py               # OS path resolution
 ```
-
-### Module Responsibilities
-
-| Subsystem | Responsibility |
-| :--- | :--- |
-| **`core/`** | Application lifecycle, tab collections, navigation state machine, session persistence, and decoupled `EventBus`. |
-| **`ui/`** | Pure PySide6 presentation layer (main window, address bar, tab bar, toolbars, sidebars, status bar, and QSS themes). |
-| **`webengine/`** | Subclasses of `QWebEngineView` and `QWebEnginePage`, profile management (persistent & incognito), request interceptors, and download handlers. |
-| **`devtools/`** | Dedicated Chromium Developer Tools subsystem: remote debugging coordinator, inspector dock panel, element inspector, console, and network monitor. |
-| **`features/`** | Isolated, toggleable browser features (bookmarks, history, downloads, private browsing, reader mode, ad blocking, and AI assistant). |
-| **`storage/`** | SQLite database manager, versioned schema migrations, user preferences, and repository access abstractions. |
-| **`security/`** | Safe URL scheme validation, TLS/SSL certificate verification, and origin-based permission enforcement. |
-| **`services/`** | Background operational services such as search query suggestions, asynchronous favicon caching, and update checks. |
-| **`utils/`** | Centralized logging, cross-platform application path resolvers, and global browser constants. |
-| **`tests/`** | Structured test suites: unit tests (`tests/unit/`), integration tests (`tests/integration/`), and end-to-end browser tests (`tests/e2e/`). |
-
----
-
-## Installation and Setup
-
-### Prerequisites
-- **Operating System**: Windows 10/11 (Linux and macOS support planned)
-- **Python**: Version `3.10` or higher (`3.12` recommended)
-
-### 1. Clone the Repository
-```bash
-git clone https://github.com/Pranatheesh-S/LightMq.git
-cd LightMq
-```
-
-### 2. Set Up a Virtual Environment (Windows)
-```powershell
-# Create a virtual environment
-python -m venv .venv
-
-# Activate the virtual environment
-.venv\Scripts\activate
-```
-
-### 3. Install Dependencies
-Install the package in editable mode along with development and testing dependencies:
-```powershell
-pip install -e .[dev]
-```
-
-### 4. Running the Browser
-> **Note**: An executable entry point is planned for **Phase 1**. Running the browser will be available once the core window and event loop are implemented:
-> ```powershell
-> # Planned launch command (Phase 1)
-> python -m browser.main
-> # Or via console script:
-> lightmq
-> ```
-
----
-
-## Development Roadmap
-
-The development of LightMq is planned in five incremental phases:
-
-- **Phase 1: Browser MVP & Inspect Element**
-  - Application window shell (`main_window.py`).
-  - Draggable, closeable tab bar (`tab_bar.py`) and tab collection manager (`tab_manager.py`).
-  - Navigation controls and omnibox address bar (`address_bar.py`, `navigation.py`).
-  - Qt WebEngine integration (`web_view.py`, `web_page.py`, `web_profile.py`).
-  - Built-in Chromium Developer Tools integration and right-click "Inspect Element" (`devtools/`).
-
-- **Phase 2: Bookmarks, History & Downloads**
-  - SQLite database layer and schema migrations (`storage/database.py`).
-  - Bookmarks manager bar and storage (`features/bookmarks/`).
-  - Searchable browsing history with privacy clearing (`features/history/`).
-  - Download interception and progress tracking (`webengine/download_handler.py`, `features/downloads/`).
-  - Session save and crash restoration (`core/session_manager.py`).
-
-- **Phase 3: Custom Developer Tools**
-  - Interactive DOM hierarchy tree viewer (`devtools/dom_tree.py`).
-  - Live CSS rule inspector and box model visualizer (`devtools/css_inspector.py`).
-  - JavaScript console input/output panel (`devtools/console_panel.py`).
-  - Network traffic monitor for requests, headers, and timings (`devtools/network_monitor.py`).
-
-- **Phase 4: Privacy & Security**
-  - Incognito / private browsing mode with ephemeral in-memory profiles (`features/private_browsing/`).
-  - Multi-profile management for work and personal browsing (`features/profiles/`).
-  - Strict URL scheme validation (`security/url_validator.py`).
-  - SSL/TLS certificate validation and warning interstitials (`security/certificate_handler.py`).
-  - Granular web permission policy management (`security/permission_policy.py`).
-
-- **Phase 5: Advanced Features & Packaging**
-  - Network-level ad and tracker blocker (`features/ad_blocking/`).
-  - User extensions and script injection support (`features/extensions/`).
-  - Distraction-free article reader mode (`features/reader_mode/`).
-  - Integrated AI Assistant sidecar panel (`features/ai_assistant/`).
-  - Application packaging for Windows (installer/MSIX), Linux (AppImage/Flatpak), and macOS (`packaging/`).
 
 ---
 
 ## Testing
 
-The testing suite is structured using `pytest` and `pytest-qt` under `tests/`:
-
-```text
-tests/
-├── unit/           # Unit tests for core models, event bus, and utilities
-├── integration/    # Integration tests for storage, profiles, and interceptors
-└── e2e/            # End-to-end GUI and browsing workflow tests
-```
-
-### Running Tests
-The test directory scaffolding is initialized. Test execution will be enabled as test cases are added alongside Phase 1 implementations:
+The project includes comprehensive unit, integration, and end-to-end automated tests:
 
 ```powershell
-# Run the test suite
-pytest
+# Run the complete test suite
+python -m pytest tests/
 
 # Run unit tests only
-pytest tests/unit
+python -m pytest tests/unit/
 
-# Run tests with verbose output
-pytest -v
+# Run integration tests only
+python -m pytest tests/integration/
+
+# Run with verbose output
+python -m pytest tests/ -v
 ```
+
+All 32 test cases verify:
+- Tab manager creation, closing, wrap-around switching, and index bounds.
+- UI synchronization when switching tabs (Address Bar, Back/Forward actions, window title).
+- Background tab isolation (background tabs never overwrite active tab's address bar).
+- Chromium DevTools dynamic attachment across tab switches and safe detachment when closing tabs.
+- Final tab closure behavior (automatically recreating a clean start page tab).
+- Engine version detection and diagnostics formatting.
+- URL normalization and address bar signal emission.
+- Repeated DevTools open/close stability and live page loading.
 
 ---
 
-## Documentation
+## Known Limitations
 
-Comprehensive technical documentation is available in the `docs/` directory:
-
-- [docs/architecture.md](docs/architecture.md) — System architecture, subsystem breakdown, and component interaction.
-- [docs/development.md](docs/development.md) — Development conventions, coding standards, and environment setup.
-- [docs/security.md](docs/security.md) — Security model, process isolation, and permission policies.
-- [docs/roadmap.md](docs/roadmap.md) — Detailed feature roadmap and milestone breakdown.
+- **No Search Query Fallback**: Text entered into the address bar must be a URL or domain name (e.g., `example.com`). Integrated search engine fallback is scheduled for Phase 3.
+- **Chromium Version Gap**: Bundled Chromium is pinned to v140 (the latest available via Qt WebEngine 6.12.0), while standalone Google Chrome is currently on v158.
+- **No Local Persistence**: History and bookmarks are not yet saved to a persistent SQLite database.
+- **Downloads**: File downloads currently use default WebEngine handlers until a dedicated download manager and shelf are implemented.
 
 ---
 
