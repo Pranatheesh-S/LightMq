@@ -80,7 +80,7 @@ class BookmarkManager(QObject):
         self._bookmarks.append(entry)
         self._save()
         self.bookmarks_changed.emit()
-        logger.info("Added bookmark: %s (%s)", entry["title"], entry["url"])
+        logger.info("Added bookmark")
         return True
 
     def remove_bookmark(self, url: str) -> bool:
@@ -97,7 +97,7 @@ class BookmarkManager(QObject):
         if len(self._bookmarks) < initial_len:
             self._save()
             self.bookmarks_changed.emit()
-            logger.info("Removed bookmark: %s", url)
+            logger.info("Removed bookmark")
             return True
         return False
 

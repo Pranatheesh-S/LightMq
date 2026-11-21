@@ -5,12 +5,11 @@ find-in-page, zoom bounds, bookmarks bar toggling, and DevTools shortcuts.
 """
 
 import sys
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, QSettings
 from PySide6.QtWidgets import QApplication
 
 from browser.features.bookmarks.bookmark_manager import BookmarkManager
 from browser.ui.main_window import MainWindow
-from browser.utils.constants import DEFAULT_START_URL
 
 app = QApplication.instance() or QApplication(sys.argv)
 
@@ -72,7 +71,7 @@ def test_navigation_and_focus_shortcuts():
 
     # 2. Homepage (Alt+Home)
     win.home()
-    assert win.tab_manager.current_view().url().toString() == DEFAULT_START_URL
+    assert win.tab_manager.current_view().url().toString() == win._startup_settings.homepage()
 
     # 3. Reload bypassing cache (Ctrl+Shift+R)
     win.reload_bypass_cache()
@@ -161,6 +160,23 @@ def test_fullscreen_toggle_shortcut():
     assert win.isFullScreen()
     win.toggle_fullscreen()
     assert not win.isFullScreen()
+
+
+def test_bookmarks_bar_preference_persists_only_for_normal_windows():
+    """Normal windows restore the preference while private windows ignore it."""
+    settings = QSettings("LightMq", "LightMq Browser")
+    previous = settings.value("bookmarks_bar_visible", False, type=bool)
+    try:
+        settings.setValue("bookmarks_bar_visible", True)
+        normal = MainWindow()
+        private = MainWindow(is_private=True)
+        assert not normal.bookmarks_bar.isHidden()
+        assert private.bookmarks_bar.isHidden()
+
+        normal.toggle_bookmarks_bar()
+        assert not settings.value("bookmarks_bar_visible", True, type=bool)
+    finally:
+        settings.setValue("bookmarks_bar_visible", previous)
 
 
 def test_devtools_shortcuts():

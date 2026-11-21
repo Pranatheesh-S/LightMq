@@ -1,14 +1,14 @@
 """Application constants and engine metadata helpers for LightMq Browser."""
 
-import re
 import sys
 from PySide6.QtCore import qVersion
-from PySide6.QtWebEngineCore import QWebEngineProfile
+from PySide6.QtWebEngineCore import qWebEngineChromiumVersion
 import PySide6
+from browser.webengine.web_profile import WebProfileManager
 
 APP_NAME = "LightMq Browser"
 APP_VERSION = "0.1.0"
-DEFAULT_START_URL = "https://example.com"
+DEFAULT_START_URL = "lightmq://newtab"
 
 
 def get_bundled_chromium_version() -> str:
@@ -18,9 +18,7 @@ def get_bundled_chromium_version() -> str:
         str: Chromium version string (e.g. '140.0.0.0') or 'Unknown'.
     """
     try:
-        ua = QWebEngineProfile.defaultProfile().httpUserAgent()
-        match = re.search(r"Chrome/([0-9.]+)", ua)
-        return match.group(1) if match else "Unknown"
+        return qWebEngineChromiumVersion() or "Unknown"
     except Exception:
         return "Unknown"
 
@@ -33,7 +31,7 @@ def get_engine_diagnostics() -> dict[str, str]:
     """
     ua = "Unknown"
     try:
-        ua = QWebEngineProfile.defaultProfile().httpUserAgent()
+        ua = WebProfileManager.default_profile().httpUserAgent()
     except Exception:
         pass
 
@@ -56,6 +54,7 @@ def format_diagnostics_report() -> str:
         str: Formatted diagnostics report.
     """
     info = get_engine_diagnostics()
+    profile = WebProfileManager.diagnostics(WebProfileManager.default_profile())
     return (
         "==========================================================\n"
         " LightMq Browser - Engine & Environment Diagnostics\n"
@@ -66,8 +65,14 @@ def format_diagnostics_report() -> str:
         f" Qt Core Library:        {info['qt_version']}\n"
         f" Bundled Chromium Engine:{info['chromium_version']}\n"
         f" Host Platform:          {info['platform']}\n"
+        f" Profile Name:           {profile['profile_name']}\n"
+        f" Off the Record:         {profile['off_the_record']}\n"
+        f" Persistent Storage:     {profile['persistent_storage_path']}\n"
+        f" Cache Path:             {profile['cache_path']}\n"
+        f" Cookie Policy:          {profile['cookie_policy']}\n"
+        f" HTTP Cache Type:        {profile['http_cache_type']}\n"
+        f" Qt WebEngine Version:   {profile['qt_webengine_version']}\n"
+        f" PySide6 Version:        {profile['pyside6_version']}\n"
         "----------------------------------------------------------\n"
-        f" Default User-Agent:\n"
-        f"   {info['user_agent']}\n"
         "=========================================================="
     )

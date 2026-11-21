@@ -37,7 +37,7 @@ class AddressBar(QLineEdit):
         # Avoid overwriting user text if the address bar is currently focused
         if not self.hasFocus():
             url_str = url.toString()
-            if url_str == "about:blank":
+            if url_str in ("about:blank", "lightmq://newtab"):
                 self.clear()
             else:
                 self.setText(url_str)

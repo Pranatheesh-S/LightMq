@@ -12,7 +12,7 @@ def normalize_url(input_text: str) -> QUrl:
 
     Rules:
     - Empty input returns QUrl("about:blank").
-    - Explicit schemes (http://, https://, file://, about:) are preserved.
+    - Explicit schemes (http://, https://, file://, about:, lightmq:) are preserved.
     - Local development targets (localhost, 127.0.0.1) default to http://.
     - Standard domain names (e.g. example.com) default to https://.
     - Strips leading and trailing whitespace.
@@ -30,7 +30,7 @@ def normalize_url(input_text: str) -> QUrl:
     lower = cleaned.lower()
 
     # Preserve explicit supported schemes
-    if lower.startswith(("http://", "https://", "file://", "about:", "qrc:", "view-source:", "devtools:", "chrome:")):
+    if lower.startswith(("http://", "https://", "file://", "about:", "qrc:", "view-source:", "devtools:", "chrome:", "lightmq:")):
         return QUrl(cleaned)
 
     # Local development hosts default to http://

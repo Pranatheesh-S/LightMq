@@ -11,7 +11,10 @@ from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtWebEngineCore import QWebEngineProfile
 
 from browser.core.navigation import normalize_url
+from browser.utils.constants import DEFAULT_START_URL
 from browser.webengine.web_view import WebView
+from browser.webengine.web_page import WebPage
+from browser.storage.session_model import SessionSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +31,7 @@ class TabManager(QObject):
 
     def __init__(
         self,
-        default_url: str = "https://example.com",
+        default_url: str = DEFAULT_START_URL,
         profile: QWebEngineProfile | None = None,
         is_private: bool = False,
         parent: QObject | None = None,
@@ -38,6 +41,7 @@ class TabManager(QObject):
         self._profile = profile
         self._is_private = is_private
         self._views: list[WebView] = []
+        self._tab_ids: dict[WebView, str] = {}
         self._current_index: int = -1
         # Bounded stack of closed tab states: (url, title), maxlen=25
         self._closed_tabs: deque[tuple[QUrl, str]] = deque(maxlen=25)
@@ -79,10 +83,18 @@ class TabManager(QObject):
         except ValueError:
             return -1
 
+    def tab_id_for(self, view: WebView | None) -> str | None:
+        """Return a tab's stable in-memory identifier, if it is managed here."""
+        return self._tab_ids.get(view) if view is not None else None
+
     def create_tab(
         self,
         url: QUrl | str | None = None,
         activate: bool = True,
+        opened_for_popup: bool = False,
+        opener_view: WebView | None = None,
+        tab_id: str | None = None,
+        tab_title: str = "",
     ) -> WebView:
         """Create a new tab hosting an independent WebView.
 
@@ -94,9 +106,21 @@ class TabManager(QObject):
             WebView: The newly instantiated WebView.
         """
         view = WebView(profile=self._profile)
+        existing_ids = set(self._tab_ids.values())
+        candidate_id = tab_id if tab_id and tab_id not in existing_ids else None
+        self._tab_ids[view] = candidate_id or SessionSnapshot.new_tab_id()
+        view.restored_title = tab_title
+        view._custom_page.set_download_context(view, self, opened_for_popup, opener_view)
 
         # Connect window factory so target="_blank" links create a new tab in this manager
-        view._custom_page.set_window_factory(lambda: self.create_tab()._custom_page)
+        def create_popup_page() -> WebPage:
+            """Create and mark a tab opened by web content's new-window request."""
+            return self.create_tab(
+                opened_for_popup=True,
+                opener_view=view,
+            )._custom_page
+
+        view._custom_page.set_window_factory(create_popup_page)
 
         # Append to tab collection
         self._views.append(view)
@@ -116,7 +140,7 @@ class TabManager(QObject):
         if activate or len(self._views) == 1:
             self.set_current_index(new_index)
 
-        logger.info("Created tab %d: %s", new_index, target_qurl.toString())
+        logger.info("Created tab %d", new_index)
         return view
 
     def close_tab(self, index: int) -> None:
@@ -150,6 +174,7 @@ class TabManager(QObject):
         self.tab_closing.emit(index, closing_view)
 
         del self._views[index]
+        self._tab_ids.pop(closing_view, None)
         self.tab_closed.emit(index)
 
         # Prevent browser termination when last tab is closed
@@ -190,7 +215,7 @@ class TabManager(QObject):
 
         url, title = self._closed_tabs.pop()
         new_view = self.create_tab(url=url, activate=True)
-        logger.info("Restored closed tab: %s (%s)", title, url.toString())
+        logger.info("Restored a closed tab")
         return new_view
 
     def clear_closed_tabs(self) -> None:

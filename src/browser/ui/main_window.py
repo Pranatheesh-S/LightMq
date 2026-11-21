@@ -6,7 +6,7 @@ find-in-page, bookmarks bar, and comprehensive keyboard shortcut handling.
 """
 
 import logging
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, QSettings
 from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -24,22 +24,32 @@ from PySide6.QtWidgets import (
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 
 from browser.core.navigation import normalize_url
+from browser.core.session_manager import SessionManager
 from browser.core.tab_manager import TabManager
 from browser.devtools.devtools_manager import DevToolsManager
 from browser.devtools.devtools_panel import DevToolsPanel
 from browser.features.bookmarks.bookmark_manager import BookmarkManager
 from browser.features.downloads.download_manager import DownloadManager
 from browser.features.history.history_manager import HistoryManager
+from browser.features.privacy.privacy_manager import PrivacyManager
 from browser.ui.address_bar import AddressBar
 from browser.ui.dialogs.bookmark_dialog import BookmarkDialog
 from browser.ui.dialogs.clear_data_dialog import ClearDataDialog
 from browser.ui.dialogs.downloads_dialog import DownloadsDialog
 from browser.ui.dialogs.history_dialog import HistoryDialog
+from browser.ui.dialogs.privacy_settings_dialog import PrivacySettingsDialog
+from browser.ui.dialogs.startup_settings_dialog import StartupSettingsDialog
 from browser.ui.shortcut_manager import ShortcutManager
 from browser.ui.tab_bar import TabBar
 from browser.ui.widgets.bookmarks_bar import BookmarksBar
 from browser.ui.widgets.find_bar import FindBar
+from browser.ui.widgets.notification_toast import NotificationToast
 from browser.utils.constants import APP_NAME, DEFAULT_START_URL, get_engine_diagnostics
+from browser.storage.session_model import SessionSnapshot
+from browser.storage.settings import StartupSettings
+from browser.webengine.download_handler import attach_download_handler
+from browser.webengine.permissions import PendingPermission, PermissionRequestHandler
+from browser.webengine.web_profile import WebProfileManager
 from browser.webengine.web_view import WebView
 
 logger = logging.getLogger(__name__)
@@ -54,6 +64,8 @@ class MainWindow(QMainWindow):
         self,
         initial_url: str | None = None,
         is_private: bool = False,
+        session_manager: SessionManager | None = None,
+        restore_snapshot: SessionSnapshot | None = None,
     ):
         super().__init__()
         MainWindow._all_windows.append(self)
@@ -61,25 +73,63 @@ class MainWindow(QMainWindow):
         self._is_private = is_private
         self._was_maximized = False
         self._loading_states: dict[WebView, int] = {}
+        self._history_navigation_pending: dict[WebView, str] = {}
+        self._history_urls_by_view: dict[WebView, str] = {}
+        self._permission_dialogs: dict[tuple[int, str, int], QMessageBox] = {}
+        self._settings = QSettings("LightMq", "LightMq Browser")
+        self._startup_settings = StartupSettings(self._settings)
+        self._session_manager = None if is_private else session_manager
+        self._startup_settings_dialog: StartupSettingsDialog | None = None
 
         # Profile initialization
         if self._is_private:
             self._profile: QWebEngineProfile | None = QWebEngineProfile(self)
+            self._privacy_manager: PrivacyManager | None = None
+            self._permission_handler: PermissionRequestHandler | None = None
+            self.download_manager = DownloadManager(parent=self)
             self._base_title = f"{APP_NAME} (Private Browsing)"
         else:
-            self._profile = None
+            self._profile = WebProfileManager.default_profile()
+            self._privacy_manager = PrivacyManager(self._profile, self)
+            self._permission_handler = PermissionRequestHandler(self)
+            self._permission_handler.permission_requested.connect(self._show_permission_request)
+            self._permission_handler.request_cancelled.connect(self._dismiss_permission_request)
+            self._permission_handler.permissions_changed.connect(self._privacy_manager.permissions_changed)
+            self._privacy_manager.cache.clear_completed.connect(
+                lambda: self.status_bar.showMessage("HTTP cache clearing completed.", 5000)
+                if hasattr(self, "status_bar") else None
+            )
+            self._privacy_manager.cache.clear_failed.connect(
+                lambda message: self.status_bar.showMessage(message, 5000)
+                if hasattr(self, "status_bar") else None
+            )
+            self._privacy_manager.cookies.operation_requested.connect(
+                lambda message: self.status_bar.showMessage(message, 5000)
+                if hasattr(self, "status_bar") else None
+            )
+            self.download_manager = DownloadManager.get_instance()
             self._base_title = APP_NAME
 
         self.setWindowTitle(self._base_title)
         self.resize(1280, 850)
 
         self._init_ui()
+        self._notification_toast = NotificationToast(self)
         self._init_shortcuts()
         self._connect_downloads()
 
-        # Initialize first tab with target or default URL
-        start_target = initial_url or DEFAULT_START_URL
-        self.tab_manager.create_tab(url=start_target, activate=True)
+        if self._session_manager is not None:
+            self._session_manager.bind(self.tab_manager)
+            self._session_manager.save_failed.connect(self._on_session_save_failed)
+
+        # Restore before creating a fallback tab so no transient blank tab is saved.
+        restored_count = (
+            self._session_manager.restore(restore_snapshot)
+            if self._session_manager is not None and restore_snapshot is not None
+            else 0
+        )
+        if restored_count == 0:
+            self.tab_manager.create_tab(url=initial_url or DEFAULT_START_URL, activate=True)
 
     @property
     def web_view(self) -> WebView | None:
@@ -92,18 +142,46 @@ class MainWindow(QMainWindow):
         return self._is_private
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Clean up window reference on close."""
+        """Save the final normal session before Qt destroys tabs and child pages."""
+        if self._session_manager is not None:
+            self._session_manager.finish()
+        if self._permission_handler is not None:
+            for index in range(self.tab_manager.count()):
+                view = self.tab_manager.view_at(index)
+                if view is not None:
+                    self._permission_handler.cancel_for_page(view.page())
+        for dialog in tuple(self._permission_dialogs.values()):
+            dialog.close()
+        self._permission_dialogs.clear()
+        try:
+            self.download_manager.notification.disconnect(self._show_download_notification)
+            self.download_manager.active_count_changed.disconnect(self._update_download_button)
+        except (RuntimeError, TypeError):
+            pass
         if self in MainWindow._all_windows:
             MainWindow._all_windows.remove(self)
+        if not self._is_private and hasattr(self, "_download_handler"):
+            remaining_window = next(
+                (
+                    window
+                    for window in MainWindow._all_windows
+                    if window.download_manager is self.download_manager and not window.is_private
+                ),
+                None,
+            )
+            self._download_handler.set_parent_window(remaining_window)
         super().closeEvent(event)
 
     def _connect_downloads(self) -> None:
         """Connect download requests to DownloadManager."""
-        profile = self._profile or QWebEngineProfile.defaultProfile()
-        try:
-            profile.downloadRequested.connect(DownloadManager.get_instance().handle_download)
-        except Exception:
-            pass
+        self._download_handler = attach_download_handler(
+            self._profile, self.download_manager, self
+        )
+        self.download_manager.notification.connect(self._show_download_notification)
+        self.download_manager.active_count_changed.connect(self._update_download_button)
+        self._update_download_button(
+            sum(item.is_active for item in self.download_manager.get_downloads())
+        )
 
     def _init_ui(self) -> None:
         """Construct the tab bar, toolbar, central splitter, and status bar."""
@@ -153,7 +231,9 @@ class MainWindow(QMainWindow):
         # 6. Bookmarks Bar (Toggled with Ctrl+Shift+B, hidden by default)
         self.bookmarks_bar = BookmarksBar(parent=central_widget)
         self.bookmarks_bar.open_url_requested.connect(self.navigate_to)
-        self.bookmarks_bar.hide()
+        self.bookmarks_bar.setVisible(
+            not self._is_private and self._settings.value("bookmarks_bar_visible", False, type=bool)
+        )
         main_layout.addWidget(self.bookmarks_bar)
 
         # 7. Find in Page Bar (Toggled with Ctrl+F, hidden by default)
@@ -228,6 +308,22 @@ class MainWindow(QMainWindow):
         self.btn_about.clicked.connect(self.show_about_dialog)
         self.toolbar.addWidget(self.btn_about)
 
+        self.btn_downloads = QPushButton("Downloads", self)
+        self.btn_downloads.setToolTip("Open Download Manager (Ctrl+J)")
+        self.btn_downloads.clicked.connect(self.open_downloads)
+        self.toolbar.addWidget(self.btn_downloads)
+
+        if not self._is_private:
+            self.btn_privacy = QPushButton("Privacy", self)
+            self.btn_privacy.setToolTip("Manage cookies, permissions, cache, and browsing data")
+            self.btn_privacy.clicked.connect(self.open_privacy_settings)
+            self.toolbar.addWidget(self.btn_privacy)
+
+            self.btn_startup_settings = QPushButton("Startup", self)
+            self.btn_startup_settings.setToolTip("Choose what LightMq opens at startup")
+            self.btn_startup_settings.clicked.connect(self.open_startup_settings)
+            self.toolbar.addWidget(self.btn_startup_settings)
+
     def _build_statusbar(self) -> None:
         """Configure the bottom status bar and loading progress bar."""
         self.status_bar = QStatusBar(self)
@@ -265,7 +361,7 @@ class MainWindow(QMainWindow):
     def _on_tab_created(self, index: int, view: WebView) -> None:
         """Handle new tab creation: add to stacked widget and connect WebEngine signals."""
         self.stacked_widget.insertWidget(index, view)
-        self.tab_bar.insert_tab(index, "New Tab")
+        self.tab_bar.insert_tab(index, getattr(view, "restored_title", "") or "New Tab")
 
         # Connect signals for independent tab state updates
         view.titleChanged.connect(lambda title, v=view: self._on_tab_title_changed(v, title))
@@ -274,6 +370,11 @@ class MainWindow(QMainWindow):
         view.loadStarted.connect(lambda v=view: self._on_tab_load_started(v))
         view.loadProgress.connect(lambda prog, v=view: self._on_tab_load_progress(v, prog))
         view.loadFinished.connect(lambda ok, v=view: self._on_tab_load_finished(v, ok))
+        if self._permission_handler is not None:
+            self._permission_handler.attach_page(view.page())
+        view.page().main_frame_navigation_requested.connect(
+            lambda _url, visit_type, v=view: self._history_navigation_pending.__setitem__(v, visit_type)
+        )
         view.page().linkHovered.connect(lambda link, v=view: self._on_tab_link_hovered(v, link))
 
         # History action enabled state changes
@@ -288,6 +389,10 @@ class MainWindow(QMainWindow):
         """Prepare for tab destruction: detach DevTools if currently attached."""
         self.devtools_manager.on_view_closing(view)
         self._loading_states.pop(view, None)
+        self._history_navigation_pending.pop(view, None)
+        self._history_urls_by_view.pop(view, None)
+        if self._permission_handler is not None:
+            self._permission_handler.cancel_for_page(view.page())
 
     def _on_tab_closed(self, index: int) -> None:
         """Update UI after tab is removed from manager."""
@@ -353,6 +458,10 @@ class MainWindow(QMainWindow):
             else:
                 self.setWindowTitle(self._base_title)
 
+        visited_url = self._history_urls_by_view.get(view)
+        if visited_url and not self._is_private and view.url().toString() == visited_url:
+            HistoryManager.get_instance().update_title(visited_url, title)
+
     def _on_title_changed(self, title: str) -> None:
         """Backward-compatible helper to update title for active tab or window."""
         active = self.tab_manager.current_view()
@@ -394,6 +503,7 @@ class MainWindow(QMainWindow):
     def _on_tab_load_finished(self, view: WebView, success: bool) -> None:
         """Clear loading state, record history, and update status bar."""
         self._loading_states.pop(view, None)
+        visit_type = self._history_navigation_pending.pop(view, None)
         if view is self.tab_manager.current_view():
             self.progress_bar.hide()
             if success:
@@ -402,10 +512,16 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage(f"Failed to load: {view.url().toString()}", 5000)
             self._update_navigation_actions(view)
 
-        # Record visited page in HistoryManager (normal sessions only)
-        if success and not self._is_private:
+        # Commit only a successful top-level navigation in a regular window.
+        # This excludes failed loads, internal pages, and download responses that
+        # replace a document with a blank page.
+        if success and visit_type is not None and not self._is_private:
             url_str = view.url().toString()
-            HistoryManager.get_instance().add_entry(url_str, view.title())
+            manager = HistoryManager.get_instance()
+            manager.add_entry(
+                url_str, view.title(), favicon=view.page().iconUrl().toString(), visit_type=visit_type
+            )
+            self._history_urls_by_view[view] = url_str
 
     def _on_tab_link_hovered(self, view: WebView, url_str: str) -> None:
         """Display hovered link in status bar if this is the active tab."""
@@ -482,8 +598,8 @@ class MainWindow(QMainWindow):
             self.stop()
 
     def home(self) -> None:
-        """Navigate active tab to the default home page."""
-        self.navigate_to(self.tab_manager.default_url)
+        """Navigate the active tab to the configured homepage."""
+        self.navigate_to(self._startup_settings.homepage())
 
     def focus_address_bar(self) -> None:
         """Focus the address bar and select all current text."""
@@ -619,15 +735,104 @@ class MainWindow(QMainWindow):
         """Open the browsing history dialog."""
         self._history_dialog = HistoryDialog(parent=self)
         self._history_dialog.open_url_requested.connect(self.navigate_to)
+        self._history_dialog.open_in_new_tab_requested.connect(
+            lambda url: self.tab_manager.create_tab(url=url, activate=True)
+        )
         self._history_dialog.show()
 
     def open_downloads(self) -> None:
         """Open the downloads manager dialog."""
-        self._downloads_dialog = DownloadsDialog(parent=self)
+        if not hasattr(self, "_downloads_dialog"):
+            self._downloads_dialog = DownloadsDialog(self.download_manager, parent=self)
         self._downloads_dialog.show()
+        self._downloads_dialog.raise_()
+        self._downloads_dialog.activateWindow()
 
-    def open_clear_data(self) -> ClearDataDialog:
+    def _show_download_notification(self, message: str, timeout_ms: int) -> None:
+        """Show a lightweight transfer status in the browser status bar."""
+        self.status_bar.showMessage(message, timeout_ms)
+        peers = [
+            window
+            for window in MainWindow._all_windows
+            if window.download_manager is self.download_manager
+        ]
+        active_peer = next((window for window in peers if window.isActiveWindow()), None)
+        if active_peer is self or (active_peer is None and peers and peers[-1] is self):
+            self._notification_toast.show_message(message, timeout_ms)
+
+    def _update_download_button(self, active_count: int) -> None:
+        """Show the current active transfer count in the toolbar."""
+        self.btn_downloads.setText(f"Downloads ({active_count})" if active_count else "Downloads")
+
+    def open_privacy_settings(self) -> PrivacySettingsDialog | None:
+        """Open settings for cookies, permissions, and HTTP cache on the normal profile."""
+        if self._is_private or self._privacy_manager is None:
+            return None
+        dialog = PrivacySettingsDialog(self._privacy_manager, self.open_clear_data, self)
+        self._privacy_settings_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    def open_startup_settings(self) -> StartupSettingsDialog | None:
+        """Open native startup-mode and homepage preferences."""
+        if self._is_private:
+            return None
+        dialog = StartupSettingsDialog(self._startup_settings, self)
+        self._startup_settings_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    def _on_session_save_failed(self, message: str) -> None:
+        """Surface session persistence errors without interrupting navigation."""
+        self.status_bar.showMessage(message, 8000)
+
+    def _show_permission_request(self, request: PendingPermission) -> None:
+        """Show an asynchronous prompt naming the permission's actual origin."""
+        if self._permission_handler is None:
+            return
+        if not request.capability:
+            self._permission_handler.resolve(request, False)
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Website Permission Request")
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText(f"{request.origin}\n\nWants permission to use {request.capability}.")
+        dialog.setInformativeText("Allow only if you trust this website. No permission is granted automatically.")
+        allow_button = dialog.addButton("Allow", QMessageBox.ButtonRole.AcceptRole)
+        block_button = dialog.addButton("Block", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(block_button)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._permission_dialogs[request.key] = dialog
+        dialog.finished.connect(
+            lambda _result, req=request, box=dialog, allow=allow_button:
+                self._finish_permission_request(req, box, box.clickedButton() is allow)
+        )
+        dialog.open()
+        dialog.raise_()
+
+    def _finish_permission_request(
+        self, request: PendingPermission, dialog: QMessageBox, allow: bool,
+    ) -> None:
+        """Resolve a prompt and remove its tracking entry."""
+        self._permission_dialogs.pop(request.key, None)
+        if self._permission_handler is not None:
+            self._permission_handler.resolve(request, allow)
+
+    def _dismiss_permission_request(self, request: PendingPermission) -> None:
+        """Close a request dialog when navigation or tab destruction invalidates it."""
+        dialog = self._permission_dialogs.pop(request.key, None)
+        if dialog is not None:
+            dialog.close()
+
+    def open_clear_data(self) -> ClearDataDialog | None:
         """Open the clear browsing data dialog."""
+        if self._is_private or self._privacy_manager is None:
+            return None
         dialog = ClearDataDialog(parent=self)
         self._clear_data_dialog = dialog
         dialog.accepted.connect(lambda: self._on_clear_data_accepted(dialog))
@@ -636,22 +841,35 @@ class MainWindow(QMainWindow):
 
     def _on_clear_data_accepted(self, dialog: ClearDataDialog) -> None:
         """Process data clearing options selected in dialog."""
+        if self._privacy_manager is None:
+            return
+        summary: list[str] = []
         if dialog.clear_history:
-            HistoryManager.get_instance().clear()
-        if dialog.clear_closed_tabs:
-            self.tab_manager.clear_closed_tabs()
-
-        profile = self._profile or QWebEngineProfile.defaultProfile()
+            start, end = dialog.history_range()
+            HistoryManager.get_instance().clear(start=start, end=end)
+            summary.append("History deletion completed in LightMq.")
         if dialog.clear_cache:
-            profile.clearHttpCache()
+            if self._privacy_manager.cache.clear():
+                if self._privacy_manager.cache.supports_completion_signal:
+                    summary.append("HTTP cache deletion requested; Qt will report when it finishes.")
+                else:
+                    summary.append("HTTP cache deletion was requested; this Qt binding does not report completion.")
         if dialog.clear_cookies:
-            profile.cookieStore().deleteAllCookies()
-
-        self.status_bar.showMessage("Browsing data cleared successfully.", 3000)
+            self._privacy_manager.cookies.delete_all_cookies()
+            summary.append("Cookie deletion requested; Qt provides per-cookie events, not an all-done signal.")
+        if dialog.clear_permissions:
+            count = self._privacy_manager.reset_permissions()
+            summary.append(f"Reset {count} saved permission decision(s) reported by Qt.")
+        if summary:
+            QMessageBox.information(self, "Browsing data clear requested", "\n\n".join(summary))
+            self.status_bar.showMessage("Selected browsing-data operations were submitted.", 5000)
 
     def toggle_bookmarks_bar(self) -> None:
         """Toggle visibility of the bookmarks bar."""
-        self.bookmarks_bar.setVisible(self.bookmarks_bar.isHidden())
+        visible = self.bookmarks_bar.isHidden()
+        self.bookmarks_bar.setVisible(visible)
+        if not self._is_private:
+            self._settings.setValue("bookmarks_bar_visible", visible)
 
     def toggle_fullscreen(self) -> None:
         """Toggle window fullscreen mode, preserving previous maximized state."""

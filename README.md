@@ -70,7 +70,7 @@ Alternatively, click the **About** button in the browser toolbar to view the liv
 
 ## Features
 
-### Currently Implemented (Phase 1 & Phase 2)
+### Currently Implemented
 - [x] **Multiple Tab Management (Phase 2)**:
   - Chrome-style native tab bar positioned above the navigation toolbar (`QTabBar` + `QStackedWidget`).
   - Open new tabs via the `+` button, `Ctrl+T`, or links opening in new windows (`target="_blank"`, `window.open()`).
@@ -91,6 +91,10 @@ Alternatively, click the **About** button in the browser toolbar to view the liv
   - Full JavaScript execution and page interaction.
   - Page loading progress bar and status bar indicators.
   - Dynamic window title updates based on active webpage `<title>`.
+- [x] **Persistent Browser Profile**:
+  - Regular windows and tabs share the named `Default` Qt WebEngine profile, stored under the operating system's application-data directory at `Browser/Profiles/Default/` (`Storage/` and `Cache/` are separate). On Windows with the current app identity, this resolves below `%APPDATA%\LightMq\LightMq Browser\Browser\Profiles\Default\`.
+  - `ForcePersistentCookies` saves persistent and session cookies across normal application restarts when the website permits session restoration. This also means session cookies remain on disk until they expire or are explicitly cleared; use **Privacy** or **Clear Browsing Data** to remove them.
+  - Qt WebEngine retains supported origin storage in the profile. LightMq does not export or log cookies. This profile is shared by regular browser windows; private-window behavior remains separate.
 - [x] **Navigation Controls**:
   - Back (`←`), Forward (`→`), Reload (`↻`), and Stop (`✕`).
   - Dynamic button enabling/disabling linked to page history.
@@ -107,14 +111,62 @@ Alternatively, click the **About** button in the browser toolbar to view the liv
 - [x] **Engine Diagnostics & About Dialog**:
   - Live About dialog showing exact PySide6, Qt, and Chromium versions.
   - Command-line `--version` and `--diagnostics` flags.
+- [x] **Download Manager**:
+  - Detects downloads from all tabs through each browser profile's `downloadRequested` signal.
+  - Prompts with the server's suggested name and OS Downloads folder; a user-selected existing file requires explicit overwrite confirmation.
+  - Preserves the suggested file extension, or infers a missing one from Qt/Python MIME databases, common MIME aliases, structured MIME suffixes, or the source URL.
+  - WebEngine saves the original response bytes without converting formats. If a server provides no filename extension, recognized MIME type, or URL suffix, the format cannot be inferred and no extension is guessed.
+  - Tracks simultaneous transfers with byte counts, progress, smoothed speed, estimated time, source host, MIME/file type, destination, and state.
+  - Provides pause, resume, cancel, open completed file, show containing folder, and remove finished record controls.
+  - Shows brief nonmodal popups for started, completed, cancelled, and failed downloads; completed rows show “Completed” with no remaining-time estimate.
+  - If a direct top-level download response would replace the current tab with a blank document, LightMq returns to the previous history entry; a tab without prior history shows a short download notice instead.
+  - Temporary `target="_blank"` tabs created only to serve a download are closed after the request is accepted, preventing empty tabs from remaining after the transfer.
+  - Open from the toolbar or with `Ctrl+J`. `Esc` closes the dialog when it has focus.
+  - Regular windows share the normal profile's session download list. Private windows use a separate in-memory list.
+
+- **Browsing History**:
+  - Successful HTTP(S) top-level navigations are saved as individual UTC-timestamped visits in SQLite under the operating system's application-data directory. The database persists across tabs, browser restarts, and computer restarts. Qt navigation categories are retained where available (link, typed, form, back/forward, reload, redirect, or other).
+  - Each visit is committed once after `loadFinished(True)` and only when its page accepted a main-frame navigation. Redirect chains are represented by the final loaded URL; reloads count as new visits. Failed loads, private-window visits, and internal/non-web schemes are excluded.
+  - Search titles and URLs (including domains), filter by today, yesterday, the last 7/30 days, or custom local calendar dates, and page through results. History entries can be opened in the current/new tab, copied, or deleted individually or for an entire site.
+  - Clear history for the last hour, 24 hours, 7 days, 30 days, or all time. Ctrl+H opens history; Enter opens and Delete removes a selected visit while the results table has focus; Escape closes the dialog.
+  - The history database is local and is never uploaded. Private windows do not write history. Clearing this application history database does **not** clear Chromium's per-tab Back/Forward history, HTTP cache, or cookies.
+  - Navigation that does not produce a successful main-frame load (including downloads and some single-page-app `pushState` changes) is not represented as a visit. Favicon URLs are retained when WebEngine reports one; favicon image bytes are not cached by history.
+
+- **New Tab Page**:
+  - New tabs and new windows open a built-in LightMq start page instead of navigating to `example.com`. Home uses the configured homepage (Google by default).
+  - The page is self-contained and includes a search/address field plus quick links for Google, YouTube, GitHub, and Wikipedia. Typed addresses navigate directly; other text is searched with Google.
+
+- **Session Restoration & Startup**:
+  - Regular browser tabs are saved in a versioned JSON snapshot below the operating-system application-data directory in `Sessions/current_session.json`; an atomic recovery copy is kept alongside it. URLs, titles, tab order, and active tab are stored. Cookies remain in the separate Qt WebEngine profile.
+  - The **Startup** toolbar button selects **Open a new tab**, **Open a specific homepage**, or **Continue where I left off**. Continue is the default; the homepage is configurable and the Home shortcut navigates there.
+  - Session writes are debounced and use Qt atomic file replacement. A separate lifecycle marker distinguishes a clean close from an unclean previous run. When an unclean run has a valid recovery snapshot, LightMq offers **Restore Tabs** or **Start Fresh**.
+  - Restoration reloads supported HTTP(S) pages and LightMq's start page in their saved order, with the prior active tab selected. URLs containing user-info or common authentication-token query parameters, and unsupported/internal transient schemes, are excluded from snapshots.
+  - Session files are local browsing metadata and may reveal visited URLs. Restoration does not preserve DOM/JavaScript state, form contents, scroll position, complete back/forward history, DevTools state, media playback, or in-progress downloads. Persistent login cookies remain separate and are reused by restored tabs, subject to each website's rules.
+
+- **Privacy & Security**:
+  - Open **Privacy** in a regular browser window to inspect cookie metadata, delete one cookie, session cookies, or all cookies, review/reset Qt WebEngine permission decisions, and clear the HTTP cache.
+  - Cookie names, domains, paths, expiry, session/persistent status, Secure, and HttpOnly flags are shown; cookie values are never shown or logged. Cookie listing and deletion are asynchronous. Qt emits per-cookie add/remove events but no inventory-finished or delete-all-finished signal, so LightMq reports requests without claiming final completion.
+  - Website requests for camera, microphone, screen sharing, mouse lock, desktop notifications, geolocation, clipboard, and local-font access prompt with the requesting origin. Requests are denied by default when unsupported, insecure, stale, or dismissed. Decisions use Qt's profile permission store and its configured persistence policy; LightMq does not create a separate permission database.
+  - **Clear Browsing Data** (`Ctrl+Shift+Delete`) supports history ranges of last hour, 24 hours, 7 days, 30 days, and all time. Cookie, HTTP-cache, and saved-permission selections clear the entire selected category regardless of the chosen history time range, and the confirmation dialog states this explicitly.
+  - HTTP-cache clearing uses Qt WebEngine's completion signal where available. Clearing LightMq history does not clear cookies, cache, Chromium's visited-link database, or open tabs' Back/Forward lists. Cookie/cache/permission clearing does not remove Local Storage, IndexedDB, downloaded files, or browser settings.
+  - These controls operate on the shared regular profile. Cookie persistence is configured as `ForcePersistentCookies`; HTTP caching uses `DiskHttpCache`. Permission decisions retain Qt's configured policy. The existing private-window behavior is unchanged; privacy controls are not exposed there.
+  - Qt's profile diagnostics (`python src/browser/main.py --diagnostics`) report profile name, off-the-record status, storage/cache paths, cookie/cache policies, and Qt WebEngine, PySide6, and Chromium versions. They do not expose cookie values.
+  - Login restoration depends on each website's cookie and authentication rules. Google may block sign-in in embedded browsers; LightMq does not bypass that restriction or guarantee Google login compatibility.
+  - References: [QWebEngineCookieStore](https://doc.qt.io/qtforpython-6/PySide6/QtWebEngineCore/QWebEngineCookieStore.html), [QWebEnginePermission](https://doc.qt.io/qtforpython-6/PySide6/QtWebEngineCore/QWebEnginePermission.html), and [QWebEngineProfile](https://doc.qt.io/qtforpython-6/PySide6/QtWebEngineCore/QWebEngineProfile.html).
 
 ### Planned Features (Future Phases)
-- [ ] **Bookmarks & History**: Local SQLite-backed bookmark hierarchy and searchable visit history.
-- [ ] **Download Manager**: File download interception, progress tracking, and download shelf.
-- [ ] **Session Restoration**: Automatic recovery of open tabs across browser restarts.
+- [ ] **Bookmarks**: Local SQLite-backed bookmark hierarchy.
+- [x] **Session Restoration**: Restore saved regular tabs, order, active tab, startup preferences, and crash recovery choices.
 - [ ] **Private Browsing (Incognito)**: Ephemeral in-memory profiles leaving no disk trace.
-- [ ] **Ad-Blocking & Privacy**: Network request interception for tracker and ad filtering.
+- [ ] **Ad-Blocking**: Network request interception for tracker and ad filtering.
 - [ ] **AI Assistant Sidecar**: Integrated copilot panel for page summarization and search.
+
+### Download Manager Notes
+
+- Download records are session-only and are not written to a database or restored after restarting LightMq.
+- Closing a tab does not stop its profile's active transfer. Closing the last browser window exits the application and ends active transfers; their incomplete files are not resumed automatically on the next launch.
+- Pausing/resuming uses Qt WebEngine's request API. Resume is available only while the current request remains resumable; interrupted downloads are marked failed/interrupted and are not promised to resume after restart.
+- Download choices, transfer, pause/resume, cancellation, and file opening were verified with Qt WebEngine 6.12.0 using a controlled local HTTP download. Opening a file or folder uses the operating system's registered handler and always requires a button click.
 
 ---
 
@@ -129,19 +181,35 @@ Alternatively, click the **About** button in the browser toolbar to view the liv
 
 ## Keyboard Shortcuts
 
+Shortcuts are registered once per browser window by `ShortcutManager` with window scope, so each command operates on that window's active tab. Standard editing keys such as Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+A, Ctrl+Z, and Ctrl+Y remain available to text inputs and pages.
+
 | Shortcut | Action |
 | :--- | :--- |
-| **`Ctrl + T`** | Open new tab |
-| **`Ctrl + W`** | Close current tab |
-| **`Ctrl + Tab`** | Switch to next tab (forward cycle with wrap-around) |
-| **`Ctrl + Shift + Tab`** | Switch to previous tab (backward cycle with wrap-around) |
-| **`Ctrl + L`** | Focus Address Bar and select all text |
-| **`Enter`** | Navigate to address typed in the Address Bar |
-| **`Ctrl + R` / `F5`** | Reload active tab |
-| **`Alt + Left`** | Navigate Back |
-| **`Alt + Right`** | Navigate Forward |
-| **`Esc`** | Stop loading active tab |
-| **`F12`** | Toggle Chromium Developer Tools (Inspect Element) for active tab |
+| `Ctrl+T` / `Ctrl+W` / `Ctrl+Shift+T` | Open tab / close tab / restore recently closed tab (up to 25 URLs per normal window) |
+| `Ctrl+N` / `Ctrl+Shift+N` | Open normal window / private window |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab, wrapping at the ends |
+| `Ctrl+1` … `Ctrl+8` / `Ctrl+9` | Select tab 1–8 / last tab |
+| `Ctrl+L` | Focus and select the address bar |
+| `Alt+Left` / `Alt+Right` / `Alt+Home` | Back / forward / home |
+| `F5` / `Ctrl+R` / `Ctrl+Shift+R` | Reload / reload / reload bypassing cache |
+| `Esc` | Stop loading, or close the find bar when it is open |
+| `Ctrl+F` | Find text in the active page; Enter and Shift+Enter move through matches |
+| `Ctrl+D` / `Ctrl+P` / `Ctrl+S` | Bookmark / print / save active page |
+| `Ctrl+H` / `Ctrl+J` / `Ctrl+Shift+Delete` | History / downloads / clear browsing data |
+| `Ctrl+Shift+B` | Toggle bookmarks bar (visibility is saved for normal windows) |
+| `F11` | Toggle fullscreen, restoring the prior maximized or normal state |
+| `Ctrl++` (also `Ctrl+=`) / `Ctrl+-` / `Ctrl+0` | Zoom in / out / reset (25%–500%) |
+| `F12` / `Ctrl+Shift+I` | Toggle Chromium Developer Tools |
+| `Ctrl+Shift+J` | Open Developer Tools and focus its view |
+| `Ctrl+Shift+C` | Invoke Chromium's Inspect Element page action and open Developer Tools |
+| `Ctrl+U` | Open the current URL using Chromium's `view-source:` scheme in a new tab |
+
+### Shortcut support and limitations
+
+- Find-in-page uses `QWebEngineView.findText()`. Cache bypass uses Qt WebEngine's `ReloadAndBypassCache` page action.
+- Developer Tools are Chromium's bundled inspector attached through `QWebEnginePage.setDevToolsPage()`. Qt WebEngine does not expose commands to select a specific DevTools panel; therefore Ctrl+Shift+J opens and focuses the DevTools view but cannot guarantee switching to the Console panel. Inspect Element relies on Qt's exposed `InspectElement` action.
+- Ctrl+U uses Chromium's built-in `view-source:` URL handling. Printing and saving use Qt WebEngine page APIs.
+- Recently closed tabs keep URL and title only; in-memory page state and private tabs are not restored. Private windows use an ephemeral profile and do not write closed-tab restore history.
 
 ---
 
@@ -180,7 +248,7 @@ pip install --upgrade PySide6
 
 ### 5. Run the Browser
 ```powershell
-# Launch browser (opens default page https://example.com)
+# Launch browser (opens the built-in LightMq new-tab page)
 python src/browser/main.py
 
 # Launch browser with a custom target URL
@@ -206,10 +274,18 @@ src/browser/
 ├── ui/
 │   ├── main_window.py         # Main browser window, toolbar, tab bar, and splitter layout
 │   ├── tab_bar.py             # Custom QTabBar wrapper with '+' button and close buttons
-│   └── address_bar.py         # Custom QLineEdit address bar
+│   ├── address_bar.py         # Custom QLineEdit address bar
+│   └── dialogs/
+│       └── downloads_dialog.py # Native Qt download list and controls
 ├── webengine/
 │   ├── web_view.py            # QWebEngineView wrapper
-│   └── web_page.py            # QWebEnginePage configuration, window open handler & SSL handling
+│   ├── web_page.py            # QWebEnginePage configuration, window open handler & SSL handling
+│   └── download_handler.py    # Per-profile request routing and destination prompt
+├── features/
+│   └── downloads/
+│       ├── download_manager.py # Session transfer coordinator
+│       ├── download_item.py    # Per-request progress and control model
+│       └── download_utils.py   # Safe names and transfer formatting
 ├── devtools/
 │   ├── devtools_manager.py    # DevTools attachment, dynamic re-targeting & toggle coordinator
 │   └── devtools_panel.py      # Resizable DevTools container widget
@@ -238,7 +314,7 @@ python -m pytest tests/integration/
 python -m pytest tests/ -v
 ```
 
-All 32 test cases verify:
+The automated suite covers:
 - Tab manager creation, closing, wrap-around switching, and index bounds.
 - UI synchronization when switching tabs (Address Bar, Back/Forward actions, window title).
 - Background tab isolation (background tabs never overwrite active tab's address bar).
@@ -254,8 +330,12 @@ All 32 test cases verify:
 
 - **No Search Query Fallback**: Text entered into the address bar must be a URL or domain name (e.g., `example.com`). Integrated search engine fallback is scheduled for Phase 3.
 - **Chromium Version Gap**: Bundled Chromium is pinned to v140 (the latest available via Qt WebEngine 6.12.0), while standalone Google Chrome is currently on v158.
-- **No Local Persistence**: History and bookmarks are not yet saved to a persistent SQLite database.
-- **Downloads**: File downloads currently use default WebEngine handlers until a dedicated download manager and shelf are implemented.
+- **Bookmark Storage**: Bookmarks remain in their existing JSON store; only browsing history uses SQLite.
+- **Login Persistence**: Regular browsing uses Qt WebEngine's named `Default` profile in the OS application-data directory. Session cookies are intentionally persisted across normal restarts. Clearing cookies from Privacy or Clear Browsing Data removes stored login cookies.
+- **Authentication Compatibility**: Websites may expire or revoke sessions, require reauthentication, or restrict embedded browsers. Google sign-in is not guaranteed and security restrictions are not bypassed.
+- **Permission Persistence**: Permission decision persistence follows the active Qt WebEngine profile policy; the settings list shows the state Qt reports for each decision.
+- **Website Storage**: Qt's cache and cookie APIs do not clear Local Storage or IndexedDB. Cookie removal is asynchronous and has no operation-complete signal.
+- **History Scope**: Clearing LightMq history does not clear Chromium's per-tab Back/Forward entries, visited-link database, or cookies.
 
 ---
 

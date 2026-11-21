@@ -1,105 +1,104 @@
-"""Download manager subsystem for LightMq Browser.
-
-Tracks file download requests, transfer progress, and completion states.
-"""
+"""Session-only coordinator for Qt WebEngine download requests."""
 
 import logging
-from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWebEngineCore import QWebEngineDownloadRequest
+
+from browser.features.downloads.download_item import DownloadItem
 
 logger = logging.getLogger(__name__)
 
 
-class DownloadItem:
-    """Represents a single tracked download."""
-
-    def __init__(self, request: QWebEngineDownloadRequest):
-        self.id = request.id()
-        self.filename = request.suggestedFileName()
-        self.url = request.url().toString()
-        self.download_path = str(Path(request.downloadDirectory()) / (request.downloadFileName() or request.suggestedFileName()))
-        self.received_bytes = request.receivedBytes()
-        self.total_bytes = request.totalBytes()
-        self.state_str = "Downloading"
-        self._request = request
-
-    def update_from_request(self) -> None:
-        """Refresh dynamic properties from the underlying request."""
-        self.received_bytes = self._request.receivedBytes()
-        self.total_bytes = self._request.totalBytes()
-        state = self._request.state()
-        if state == QWebEngineDownloadRequest.DownloadState.DownloadCompleted:
-            self.state_str = "Completed"
-        elif state == QWebEngineDownloadRequest.DownloadState.DownloadCancelled:
-            self.state_str = "Cancelled"
-        elif state == QWebEngineDownloadRequest.DownloadState.DownloadInterrupted:
-            self.state_str = f"Interrupted: {self._request.interruptReasonString()}"
-        else:
-            self.state_str = "Downloading"
-
-
 class DownloadManager(QObject):
-    """Manages tracking, notification, and history of browser file downloads."""
+    """Retain and coordinate simultaneous downloads independently of browser tabs."""
 
     downloads_changed = Signal()
-    download_started = Signal(str)
-    download_finished = Signal(str, bool)
+    item_added = Signal(object)
+    notification = Signal(str, int)
+    active_count_changed = Signal(int)
 
     _instance: "DownloadManager | None" = None
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
         self._downloads: list[DownloadItem] = []
+        self._handlers: dict[tuple[int, int], QObject] = {}
 
     @classmethod
     def get_instance(cls) -> "DownloadManager":
-        """Return shared singleton instance of DownloadManager."""
+        """Return the shared manager used by regular browser windows."""
         if cls._instance is None:
             cls._instance = DownloadManager()
         return cls._instance
 
-    def handle_download(self, request: QWebEngineDownloadRequest) -> None:
-        """Register and monitor a new incoming download request."""
-        # Set default download directory to user Downloads if not configured
-        if not request.downloadDirectory():
-            default_dir = str(Path.home() / "Downloads")
-            request.setDownloadDirectory(default_dir)
+    def handler_for(self, key: tuple[int, int]) -> QObject | None:
+        """Return a retained profile handler, if one was already connected."""
+        return self._handlers.get(key)
 
-        item = DownloadItem(request)
+    def retain_handler(self, key: tuple[int, int], handler: QObject) -> None:
+        """Keep the profile signal receiver alive for its entire connection."""
+        self._handlers[key] = handler
+
+    def add_request(self, request: QWebEngineDownloadRequest, destination: str) -> DownloadItem:
+        """Track a configured request before it is accepted by Qt WebEngine."""
+        item = DownloadItem(request, parent=self)
+        item.destination = destination
+        item.changed.connect(lambda tracked=item: self._on_item_changed(tracked))
         self._downloads.insert(0, item)
-        self.download_started.emit(item.filename)
+        self.item_added.emit(item)
         self.downloads_changed.emit()
+        return item
 
-        request.receivedBytesChanged.connect(lambda: self._on_progress(item))
-        request.stateChanged.connect(lambda state: self._on_state_changed(item, state))
+    def mark_accepted(self, request_id: int) -> None:
+        """Announce a request after its destination is configured and accepted."""
+        item = self.get_by_id(request_id)
+        if item is not None:
+            self.notify(f"Download started: {item.filename}", 3000)
+            self._emit_state()
 
-        # Accept download
-        request.accept()
-        logger.info("Accepted download for: %s -> %s", item.filename, item.download_path)
-
-    def _on_progress(self, item: DownloadItem) -> None:
-        """Handle byte transfer updates."""
-        item.update_from_request()
-        self.downloads_changed.emit()
-
-    def _on_state_changed(
-        self,
-        item: DownloadItem,
-        state: QWebEngineDownloadRequest.DownloadState,
-    ) -> None:
-        """Handle download completion, interruption, or cancellation."""
-        item.update_from_request()
-        is_success = (state == QWebEngineDownloadRequest.DownloadState.DownloadCompleted)
-        self.download_finished.emit(item.filename, is_success)
-        self.downloads_changed.emit()
-        logger.info("Download state changed for %s: %s", item.filename, item.state_str)
+    def get_by_id(self, request_id: int) -> DownloadItem | None:
+        """Find a retained request by Qt's request identifier."""
+        return next((item for item in self._downloads if item.id == request_id), None)
 
     def get_downloads(self) -> list[DownloadItem]:
-        """Return all tracked downloads."""
+        """Return a snapshot of session download records, newest first."""
         return list(self._downloads)
 
+    def remove(self, item: DownloadItem) -> None:
+        """Remove a finished entry without deleting its downloaded file."""
+        if item.is_active or item not in self._downloads:
+            return
+        self._downloads.remove(item)
+        item.deleteLater()
+        self._emit_state()
+
     def clear(self) -> None:
-        """Clear completed downloads from list."""
-        self._downloads = [d for d in self._downloads if d.state_str == "Downloading"]
+        """Remove all finished entries while retaining active transfers."""
+        retained: list[DownloadItem] = []
+        for item in self._downloads:
+            if item.is_active:
+                retained.append(item)
+            else:
+                item.deleteLater()
+        self._downloads = retained
+        self._emit_state()
+
+    def notify(self, message: str, timeout_ms: int = 3000) -> None:
+        """Emit a short, nonintrusive UI notification."""
+        self.notification.emit(message, timeout_ms)
+
+    def _on_item_changed(self, item: DownloadItem) -> None:
+        if not item.is_active and not item.terminal_notification_sent:
+            item.terminal_notification_sent = True
+            if item.status == "Completed":
+                self.notify(f"Download completed: {item.filename}", 4000)
+            elif item.status == "Cancelled":
+                self.notify(f"Download cancelled: {item.filename}", 3000)
+            elif item.status.startswith("Failed"):
+                self.notify(f"{item.status}: {item.filename}", 6000)
+                logger.warning("Download %s ended: %s", item.filename, item.status)
+        self._emit_state()
+
+    def _emit_state(self) -> None:
         self.downloads_changed.emit()
+        self.active_count_changed.emit(sum(item.is_active for item in self._downloads))

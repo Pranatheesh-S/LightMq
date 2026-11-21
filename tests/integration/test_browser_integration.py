@@ -4,6 +4,9 @@ import sys
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QApplication
 
+from browser.features.history.history_manager import HistoryManager
+from browser.ui.dialogs.clear_data_dialog import ClearDataDialog
+from browser.ui.dialogs.privacy_settings_dialog import PrivacySettingsDialog
 from browser.ui.main_window import MainWindow
 
 app = QApplication.instance() or QApplication(sys.argv)
@@ -78,3 +81,55 @@ def test_title_change_updates_window():
 
     window._on_title_changed("")
     assert window.windowTitle() == "LightMq Browser"
+
+
+def test_successful_tab_navigation_is_written_to_history(tmp_path):
+    """The main-window loadFinished handler commits the pending navigation once."""
+    previous_manager = HistoryManager._instance
+    manager = HistoryManager(storage_path=tmp_path / "history.sqlite3")
+    HistoryManager._instance = manager
+    window = MainWindow(initial_url="about:blank")
+    try:
+        view = window.web_view
+        assert view is not None
+        view.setUrl(QUrl("https://history-test.example/path"))
+        view.page().main_frame_navigation_requested.emit("https://history-test.example/path", "typed")
+
+        window._on_tab_load_finished(view, True)
+        window._on_tab_load_finished(view, True)
+
+        visits = manager.get_entries()
+        assert len(visits) == 1
+        assert visits[0]["url"] == "https://history-test.example/path"
+        assert visits[0]["visit_type"] == "typed"
+    finally:
+        window.close()
+        HistoryManager._instance = previous_manager
+
+
+def test_privacy_settings_and_clear_data_dialogs_initialize():
+    """Normal windows expose profile privacy settings and supported clear options."""
+    window = MainWindow(initial_url="about:blank")
+    try:
+        assert window.btn_privacy is not None
+        view = window.web_view
+        assert view is not None
+        assert id(view.page()) in window._permission_handler._attached_pages
+
+        settings = PrivacySettingsDialog(
+            window._privacy_manager, window.open_clear_data, window,
+        )
+        assert settings.tabs.count() == 3
+        assert settings.cookie_table.columnCount() == 7
+        assert settings.permission_table.columnCount() == 4
+
+        clear_dialog = ClearDataDialog(window)
+        assert clear_dialog.clear_history is True
+        assert clear_dialog.clear_cookies is True
+        assert clear_dialog.clear_cache is True
+        assert clear_dialog.clear_permissions is False
+        assert clear_dialog.history_range() == (None, None)
+        settings.close()
+        clear_dialog.close()
+    finally:
+        window.close()
