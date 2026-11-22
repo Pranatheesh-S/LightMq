@@ -4,7 +4,7 @@ import logging
 import weakref
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, QUrl
+from PySide6.QtCore import QObject, QTimer, QUrl, QSettings
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
 from PySide6.QtWebEngineCore import (
     QWebEngineDownloadRequest,
@@ -30,9 +30,12 @@ class DownloadHandler(QObject):
         manager: DownloadManager,
         parent_window: QWidget | None = None,
         parent: QObject | None = None,
+        private_session: bool = False,
     ) -> None:
         super().__init__(parent)
         self._manager = manager
+        self._private_session=private_session
+        self._private_notice_shown=False
         self._window_ref = weakref.ref(parent_window) if parent_window is not None else lambda: None
 
     def handle_request(self, request: QWebEngineDownloadRequest) -> None:
@@ -46,14 +49,18 @@ class DownloadHandler(QObject):
         suggested = preserve_file_extension(
             safe_filename(original_name), original_name, mime_type, source_url
         )
-        initial = str(default_download_directory() / suggested)
+        prefs = QSettings("LightMq", "LightMq Browser")
+        configured_dir = str(prefs.value("downloads/default_directory", "")).strip()
+        base_dir = Path(configured_dir).expanduser() if configured_dir else default_download_directory()
+        initial = str(base_dir / suggested)
         window = self._window_ref()
         parent = window if window is not None else None
 
         try:
-            destination, _ = QFileDialog.getSaveFileName(
-                parent, "Save Download", initial, "All Files (*)"
-            )
+            if bool(prefs.value("downloads/ask_before_saving", True, type=bool)):
+                destination, _ = QFileDialog.getSaveFileName(parent, "Save Download", initial, "All Files (*)")
+            else:
+                destination = initial
             while destination:
                 target = Path(destination).expanduser()
                 filename = preserve_file_extension(
@@ -82,6 +89,9 @@ class DownloadHandler(QObject):
                 self._manager.add_request(request, str(target.resolve()))
                 request.accept()
                 self._manager.mark_accepted(request.id())
+                if self._private_session and not self._private_notice_shown:
+                    self._private_notice_shown=True
+                    self._manager.notify("Incognito downloads are saved on this device and remain after the private session ends.",6000)
                 self._schedule_popup_tab_cleanup(request)
                 # Qt may commit the download navigation after the chooser returns.
                 self._restore_page_after_download_navigation(request)
@@ -210,12 +220,13 @@ def attach_download_handler(
     profile: QWebEngineProfile,
     manager: DownloadManager,
     parent_window: QWidget | None = None,
+    private_session: bool = False,
 ) -> DownloadHandler:
     """Connect a handler once for a given profile/manager pair."""
     key = (id(profile), id(manager))
     handler = manager.handler_for(key)
     if handler is None:
-        handler = DownloadHandler(manager, parent_window, parent=manager)
+        handler = DownloadHandler(manager,parent_window,parent=manager,private_session=private_session)
         profile.downloadRequested.connect(handler.handle_request)
         manager.retain_handler(key, handler)
     elif isinstance(handler, DownloadHandler):

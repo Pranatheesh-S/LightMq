@@ -28,6 +28,27 @@ def test_snapshot_serialization_preserves_order_and_active_tab():
     assert loaded.active_tab_id == "tab-b"
 
 
+def test_schema_one_migrates_and_schema_two_preserves_tab_group_metadata():
+    legacy = SessionSnapshot.from_dict({
+        "schema_version": 1,
+        "tabs": [{"id": "legacy", "url": "https://example.com", "title": "Example", "position": 0}],
+    })
+    assert legacy.tabs[0].pinned is False
+    assert legacy.tabs[0].group_id is None
+    assert legacy.to_dict()["schema_version"] == 2
+    snapshot = SessionSnapshot.from_dict({
+        "schema_version": 2,
+        "tabs": [
+            {"id": "p", "url": "https://example.com", "position": 0, "pinned": True, "group_id": "g"},
+            {"id": "n", "url": "https://example.org", "position": 1, "group_id": "g"},
+        ],
+        "groups": [{"id": "g", "name": "Work", "color": "cyan", "collapsed": True, "position": 0}],
+    })
+    assert snapshot.tabs[0].group_id is None
+    assert snapshot.tabs[1].group_id == "g"
+    assert snapshot.groups[0].collapsed is True
+
+
 def test_snapshot_validation_skips_invalid_duplicate_and_sensitive_urls():
     loaded = SessionSnapshot.from_dict(
         {
@@ -99,6 +120,46 @@ def test_startup_settings_default_validate_and_persist(tmp_path):
     assert preferences.homepage() == "https://example.org"
     with pytest.raises(ValueError):
         preferences.set(StartupMode.NEW_TAB, "javascript:alert(1)")
+
+
+def test_restore_toggle_persists_and_parses_false_as_false(tmp_path):
+    settings = QSettings(str(tmp_path / "restore.ini"), QSettings.Format.IniFormat)
+    preferences = StartupSettings(settings)
+    assert preferences.restore_previous_session() is True
+
+    settings.setValue(StartupSettings.RESTORE_KEY, "false")
+    settings.sync()
+    restarted = StartupSettings(
+        QSettings(str(tmp_path / "restore.ini"), QSettings.Format.IniFormat)
+    )
+    assert restarted.restore_previous_session() is False
+    assert restarted.mode() is StartupMode.NEW_TAB
+
+    restarted.set_restore_previous_session(True)
+    assert StartupSettings(
+        QSettings(str(tmp_path / "restore.ini"), QSettings.Format.IniFormat)
+    ).restore_previous_session() is True
+
+
+@pytest.mark.parametrize(
+    ("legacy_mode", "expected_restore", "expected_fallback"),
+    [
+        ("continue", True, StartupMode.NEW_TAB),
+        ("homepage", False, StartupMode.HOMEPAGE),
+        ("new_tab", False, StartupMode.NEW_TAB),
+    ],
+)
+def test_startup_setting_migrates_existing_mode(
+    tmp_path, legacy_mode, expected_restore, expected_fallback
+):
+    settings = QSettings(str(tmp_path / f"{legacy_mode}.ini"), QSettings.Format.IniFormat)
+    settings.setValue(StartupSettings.MODE_KEY, legacy_mode)
+    settings.sync()
+    preferences = StartupSettings(settings)
+
+    assert preferences.restore_previous_session() is expected_restore
+    assert preferences.fallback_mode() is expected_fallback
+    assert preferences.settings.value(StartupSettings.RESTORE_KEY) is expected_restore
 
 
 def test_qsavefile_failure_preserves_last_valid_snapshot(tmp_path, monkeypatch):

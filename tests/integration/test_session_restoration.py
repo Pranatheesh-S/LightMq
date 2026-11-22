@@ -51,6 +51,35 @@ def test_session_restores_tabs_order_active_tab_and_shared_profile(tmp_path):
     )
 
 
+def test_session_restores_pinned_tabs_and_named_collapsed_group(tmp_path):
+    repository = SessionRepository(tmp_path / "Sessions")
+    manager = SessionManager(repository, app)
+    manager.begin_run()
+    window = MainWindow(initial_url="https://one.example/", session_manager=manager)
+    first = window.tab_manager.current_view()
+    second = window.tab_manager.create_tab("https://two.example/", activate=False)
+    third = window.tab_manager.create_tab("https://three.example/", activate=False)
+    group_id = window.tab_manager.create_group("Research", "purple", second)
+    window.tab_manager.add_tab_to_group(third, group_id)
+    window.tab_manager.collapse_group(group_id, True)
+    window.tab_manager.pin_tab(first)
+    manager.save_now()
+    snapshot = repository.load_current()
+    assert snapshot is not None
+
+    restored_manager = SessionManager(repository, app)
+    restored_manager.begin_run()
+    restored = MainWindow(session_manager=restored_manager, restore_snapshot=snapshot)
+    restored_group = restored.tab_manager.group_manager.group(group_id)
+    assert restored.tab_manager.is_pinned(restored.tab_manager.view_at(0))
+    assert restored_group is not None
+    assert restored_group.name == "Research" and restored_group.color == "purple"
+    assert restored_group.collapsed is True
+    assert len(restored_group.tab_ids) == 2
+    assert restored.tab_bar.count() == 3
+    assert all(restored.tab_manager.view_at(i) is not None for i in range(3))
+
+
 def test_closing_tab_updates_snapshot_without_resurrecting_it(tmp_path):
     manager = SessionManager(SessionRepository(tmp_path / "Sessions"), app)
     manager.begin_run()
@@ -83,10 +112,29 @@ def test_startup_settings_dialog_saves_homepage_and_mode(tmp_path):
         QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     )
     dialog = StartupSettingsDialog(preferences)
+    assert dialog.restore_checkbox.isChecked() is True
+    dialog.restore_checkbox.setChecked(False)
     dialog.homepage_radio.setChecked(True)
     dialog.homepage_edit.setText("lightmq.example")
-    dialog._save()
+    dialog._save_homepage()
 
-    assert dialog.result() == dialog.DialogCode.Accepted
+    assert preferences.restore_previous_session() is False
     assert preferences.mode() is StartupMode.HOMEPAGE
     assert preferences.homepage() == "https://lightmq.example"
+
+
+def test_runtime_toggle_keeps_tabs_open_and_does_not_restore_duplicates(tmp_path):
+    window = MainWindow(initial_url="https://one.example/")
+    window.tab_manager.create_tab("https://two.example/", activate=False)
+    window._startup_settings = StartupSettings(
+        QSettings(str(tmp_path / "runtime.ini"), QSettings.Format.IniFormat)
+    )
+    dialog = window.open_startup_settings()
+
+    dialog.restore_checkbox.setChecked(False)
+    assert window.tab_manager.count() == 2
+    assert window._startup_settings.restore_previous_session() is False
+
+    dialog.restore_checkbox.setChecked(True)
+    assert window.tab_manager.count() == 2
+    assert window._startup_settings.restore_previous_session() is True

@@ -37,3 +37,14 @@ def close_browser_windows_after_test():
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
 
+
+@pytest.fixture(autouse=True)
+def isolate_bookmark_store(tmp_path):
+    """Keep singleton bookmark mutations out of the user's browser database."""
+    from browser.features.bookmarks.bookmark_manager import BookmarkManager
+
+    previous = BookmarkManager._instance
+    BookmarkManager._instance = BookmarkManager(tmp_path / "bookmarks.sqlite3")
+    yield
+    BookmarkManager._instance = previous
+

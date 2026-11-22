@@ -25,6 +25,8 @@ class ShortcutManager(QObject):
         self._window = window
         self._shortcuts: dict[str, QShortcut] = {}
         self._registry: list[dict[str, str]] = []
+        self._callbacks: dict[str, Callable[[], None]] = {}
+        self._defaults: dict[str, str] = {}
 
     def register_shortcut(
         self,
@@ -59,6 +61,8 @@ class ShortcutManager(QObject):
         shortcut = QShortcut(seq, self._window, context=Qt.ShortcutContext.WindowShortcut)
         shortcut.activated.connect(callback)
         self._shortcuts[normalized] = shortcut
+        self._callbacks[action_name] = callback
+        self._defaults[action_name] = normalized
 
         meta = {
             "key": key_sequence,
@@ -172,6 +176,9 @@ class ShortcutManager(QObject):
             "Ctrl+Shift+B", w.toggle_bookmarks_bar, "toggle_bookmarks_bar", "Browser", "Show/hide bookmarks bar"
         )
         self.register_shortcut(
+            "Ctrl+Shift+O", w._open_bookmark_manager_shortcut, "open_bookmark_manager", "Browser", "Open bookmark manager"
+        )
+        self.register_shortcut(
             "F11", w.toggle_fullscreen, "toggle_fullscreen", "Browser", "Toggle fullscreen"
         )
         self.register_shortcut(
@@ -205,6 +212,52 @@ class ShortcutManager(QObject):
         self.register_shortcut(
             "Ctrl+U", w.view_page_source, "view_page_source", "DevTools", "View page source"
         )
+
+        for entry in self._registry:
+            stored = w._browser_settings.get(f"shortcuts/{entry['action']}", None)
+            if isinstance(stored, str) and stored != entry["key"]:
+                self._replace_binding(entry["action"], stored)
+
+    def apply_custom(self, bindings: dict[str, str]) -> bool:
+        """Validate all custom shortcuts, then atomically replace changed bindings."""
+        occupied: dict[str, str] = {}
+        for action, sequence in bindings.items():
+            normalized = QKeySequence(sequence).toString() if sequence else ""
+            if normalized and normalized in occupied:
+                return False
+            if normalized:
+                occupied[normalized] = action
+        for action, sequence in bindings.items():
+            self._replace_binding(action, sequence)
+        return True
+
+    def reset_defaults(self) -> None:
+        """Restore all currently registered actions to their original bindings."""
+        self.apply_custom(self._defaults)
+
+    def _replace_binding(self, action: str, sequence: str) -> None:
+        """Replace a registered action binding while preserving its callback."""
+        entry = next((item for item in self._registry if item["action"] == action), None)
+        if entry is None:
+            return
+        old_key = entry["normalized"]
+        shortcut = self._shortcuts.pop(old_key, None)
+        if shortcut is None:
+            return
+        callback = self._callbacks.get(action)
+        try:
+            shortcut.activated.disconnect()
+        except RuntimeError:
+            pass
+        shortcut.setEnabled(False)
+        shortcut.deleteLater()
+        normalized = QKeySequence(sequence).toString() if sequence else ""
+        entry["key"], entry["normalized"] = sequence, normalized
+        if normalized:
+            replacement = QShortcut(QKeySequence(normalized), self._window, context=Qt.ShortcutContext.WindowShortcut)
+            if callback is not None:
+                replacement.activated.connect(callback)
+            self._shortcuts[normalized] = replacement
 
     def is_registered(self, key_sequence: str) -> bool:
         """Check if a key sequence is currently registered."""

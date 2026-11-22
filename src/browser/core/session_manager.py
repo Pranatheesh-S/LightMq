@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 
 from browser.core.tab_manager import TabManager
-from browser.storage.session_model import SessionSnapshot, SessionTab
+from browser.storage.session_model import SessionGroup, SessionSnapshot, SessionTab
 from browser.storage.session_repository import SessionRepository
 from browser.webengine.web_view import WebView
 
@@ -48,6 +48,8 @@ class SessionManager(QObject):
         tab_manager.tab_closed.connect(self.schedule_save)
         tab_manager.current_changed.connect(self._on_current_changed)
         tab_manager.tab_moved.connect(self._on_tab_moved)
+        tab_manager.state_changed.connect(self.schedule_save)
+        tab_manager.group_manager.state_changed.connect(self.schedule_save)
         for index in range(tab_manager.count()):
             view = tab_manager.view_at(index)
             if view is not None:
@@ -61,17 +63,25 @@ class SessionManager(QObject):
         self._suspended = True
         restored: list[tuple[str, WebView]] = []
         try:
+            group_manager = self._tab_manager.group_manager
+            group_manager.restore_groups([
+                {"id": group.group_id, "name": group.name, "color": group.color,
+                 "collapsed": group.collapsed, "position": group.position}
+                for group in snapshot.groups
+            ])
             for tab in snapshot.tabs:
                 url = SessionSnapshot.sanitize_url(tab.url)
                 if url is None:
                     continue
                 try:
                     view = self._tab_manager.create_tab(
-                        QUrl(url), activate=False, tab_id=tab.tab_id, tab_title=tab.title
+                        QUrl(url), activate=False, tab_id=tab.tab_id, tab_title=tab.title,
+                        pinned=tab.pinned, group_id=tab.group_id,
                     )
                 except (TypeError, ValueError):
                     continue
                 restored.append((tab.tab_id, view))
+            group_manager.clear_membership()
             if restored:
                 active_id = snapshot.active_tab_id
                 active_index = next(
@@ -97,6 +107,7 @@ class SessionManager(QObject):
     def capture(self) -> SessionSnapshot:
         """Capture current URL, title, order, and active tab only."""
         tabs: list[SessionTab] = []
+        groups: list[SessionGroup] = []
         manager = self._tab_manager
         if manager is not None:
             for index in range(manager.count()):
@@ -108,12 +119,17 @@ class SessionManager(QObject):
                     continue
                 tab_id = manager.tab_id_for(view)
                 title = view.title() or getattr(view, "restored_title", "")
-                tabs.append(SessionTab(tab_id, url, title, index))
+                group_id = manager.group_manager.group_id_for_tab(tab_id)
+                tabs.append(SessionTab(tab_id, url, title, index, manager.is_pinned(view), group_id))
             active_view = manager.current_view()
             active_id = manager.tab_id_for(active_view) if active_view is not None else None
+            groups = [
+                SessionGroup(group.id, group.name, group.color, group.collapsed, position)
+                for position, group in enumerate(manager.group_manager.groups())
+            ]
         else:
             active_id = None
-        return SessionSnapshot.create(tabs, active_id)
+        return SessionSnapshot.create(tabs, active_id, groups)
 
     def save_now(self) -> bool:
         """Write the latest complete snapshot to current and recovery files."""

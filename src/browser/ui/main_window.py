@@ -6,18 +6,22 @@ find-in-page, bookmarks bar, and comprehensive keyboard shortcut handling.
 """
 
 import logging
-from PySide6.QtCore import Qt, QUrl, QSettings
+from PySide6.QtCore import Qt, QUrl, QSettings, QPoint
 from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
     QMainWindow,
     QMessageBox,
+    QMenu,
+    QInputDialog,
+    QLabel,
     QProgressBar,
     QPushButton,
     QSplitter,
     QStackedWidget,
     QStatusBar,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -31,9 +35,11 @@ from browser.devtools.devtools_panel import DevToolsPanel
 from browser.features.bookmarks.bookmark_manager import BookmarkManager
 from browser.features.downloads.download_manager import DownloadManager
 from browser.features.history.history_manager import HistoryManager
+from browser.features.private_browsing.private_manager import PrivateBrowsingManager
 from browser.features.privacy.privacy_manager import PrivacyManager
 from browser.ui.address_bar import AddressBar
 from browser.ui.dialogs.bookmark_dialog import BookmarkDialog
+from browser.ui.dialogs.bookmark_manager_dialog import BookmarkManagerDialog
 from browser.ui.dialogs.clear_data_dialog import ClearDataDialog
 from browser.ui.dialogs.downloads_dialog import DownloadsDialog
 from browser.ui.dialogs.history_dialog import HistoryDialog
@@ -41,12 +47,15 @@ from browser.ui.dialogs.privacy_settings_dialog import PrivacySettingsDialog
 from browser.ui.dialogs.startup_settings_dialog import StartupSettingsDialog
 from browser.ui.shortcut_manager import ShortcutManager
 from browser.ui.tab_bar import TabBar
+from browser.core.tab_group_manager import GROUP_COLORS
 from browser.ui.widgets.bookmarks_bar import BookmarksBar
 from browser.ui.widgets.find_bar import FindBar
 from browser.ui.widgets.notification_toast import NotificationToast
 from browser.utils.constants import APP_NAME, DEFAULT_START_URL, get_engine_diagnostics
 from browser.storage.session_model import SessionSnapshot
-from browser.storage.settings import StartupSettings
+from browser.storage.settings import StartupSettings, BrowserSettings
+from browser.ui.settings_window import SettingsWindow
+from browser.ui.theme_manager import ThemeManager
 from browser.webengine.download_handler import attach_download_handler
 from browser.webengine.permissions import PendingPermission, PermissionRequestHandler
 from browser.webengine.web_profile import WebProfileManager
@@ -78,16 +87,21 @@ class MainWindow(QMainWindow):
         self._permission_dialogs: dict[tuple[int, str, int], QMessageBox] = {}
         self._settings = QSettings("LightMq", "LightMq Browser")
         self._startup_settings = StartupSettings(self._settings)
+        self._browser_settings = BrowserSettings(self._settings, self)
+        self._theme_manager = ThemeManager(self._browser_settings,apply_global=not is_private)
         self._session_manager = None if is_private else session_manager
+        self._private_manager: PrivateBrowsingManager | None = None
         self._startup_settings_dialog: StartupSettingsDialog | None = None
 
         # Profile initialization
         if self._is_private:
-            self._profile: QWebEngineProfile | None = QWebEngineProfile(self)
+            self._private_manager=PrivateBrowsingManager.get_instance()
+            self._profile,self.download_manager=self._private_manager.acquire(self)
             self._privacy_manager: PrivacyManager | None = None
-            self._permission_handler: PermissionRequestHandler | None = None
-            self.download_manager = DownloadManager(parent=self)
-            self._base_title = f"{APP_NAME} (Private Browsing)"
+            self._permission_handler=PermissionRequestHandler(self)
+            self._permission_handler.permission_requested.connect(self._show_permission_request)
+            self._permission_handler.request_cancelled.connect(self._dismiss_permission_request)
+            self._base_title = f"{APP_NAME} — Incognito"
         else:
             self._profile = WebProfileManager.default_profile()
             self._privacy_manager = PrivacyManager(self._profile, self)
@@ -114,8 +128,11 @@ class MainWindow(QMainWindow):
         self.resize(1280, 850)
 
         self._init_ui()
+        if self._is_private:
+            self.setStyleSheet("QMainWindow{background:#202124;color:#e8eaed;} QToolBar{background:#292a2d;color:#e8eaed;} QPushButton,QToolButton{background:#303134;color:#e8eaed;border:1px solid #4b4e52;border-radius:5px;padding:4px;} QLineEdit{background:#202124;color:#e8eaed;border:1px solid #5f6368;}")
         self._notification_toast = NotificationToast(self)
         self._init_shortcuts()
+        self._browser_settings.changed.connect(self._on_browser_setting_changed)
         self._connect_downloads()
 
         if self._session_manager is not None:
@@ -129,7 +146,8 @@ class MainWindow(QMainWindow):
             else 0
         )
         if restored_count == 0:
-            self.tab_manager.create_tab(url=initial_url or DEFAULT_START_URL, activate=True)
+            start_url=initial_url or ("lightmq://incognito/" if self._is_private else DEFAULT_START_URL)
+            self.tab_manager.create_tab(url=start_url, activate=True)
 
     @property
     def web_view(self) -> WebView | None:
@@ -143,6 +161,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Save the final normal session before Qt destroys tabs and child pages."""
+        if self._is_private and self._private_manager is not None and not getattr(self,"_private_close_confirmed",False):
+            active=self._private_manager.active_downloads()
+            if active and not self._private_manager.has_other_windows(self):
+                answer=QMessageBox.question(self,"Close Incognito Session?",f"{len(active)} private download(s) are still active. Closing the final Incognito window will cancel them. Downloaded files already saved will remain on this device. Close anyway?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+                if answer!=QMessageBox.StandardButton.Yes:
+                    event.ignore();return
+                self._private_close_confirmed=True
+                self._private_manager.cancel_active_downloads()
         if self._session_manager is not None:
             self._session_manager.finish()
         if self._permission_handler is not None:
@@ -160,6 +186,15 @@ class MainWindow(QMainWindow):
             pass
         if self in MainWindow._all_windows:
             MainWindow._all_windows.remove(self)
+        if self._is_private and self._private_manager is not None and not getattr(self,"_private_released",False):
+            views=list(self.tab_manager.ordered_views())
+            self.devtools_manager.set_target_view(None)
+            self.tab_manager.dispose_all_tabs()
+            resources:list[QWidget]=[*views,self.devtools_panel]
+            self.devtools_panel.deleteLater()
+            self._private_manager.release_window(self,resources)
+            self._private_released=True
+            self._profile=None
         if not self._is_private and hasattr(self, "_download_handler"):
             remaining_window = next(
                 (
@@ -170,12 +205,15 @@ class MainWindow(QMainWindow):
                 None,
             )
             self._download_handler.set_parent_window(remaining_window)
+        elif self._is_private and hasattr(self,"_download_handler"):
+            remaining=next((window for window in MainWindow._all_windows if window.is_private and window.download_manager is self.download_manager),None)
+            self._download_handler.set_parent_window(remaining)
         super().closeEvent(event)
 
     def _connect_downloads(self) -> None:
         """Connect download requests to DownloadManager."""
         self._download_handler = attach_download_handler(
-            self._profile, self.download_manager, self
+            self._profile, self.download_manager, self, private_session=self._is_private
         )
         self.download_manager.notification.connect(self._show_download_notification)
         self.download_manager.active_count_changed.connect(self._update_download_button)
@@ -191,12 +229,18 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
 
         # 1. Tab Bar (Above Navigation Toolbar)
+        if self._is_private:
+            self.private_banner=QLabel("◉  Incognito — this window won’t save browsing history. Downloads and bookmarks you choose to save remain on this device.",central_widget)
+            self.private_banner.setObjectName("incognitoBanner")
+            self.private_banner.setWordWrap(True)
+            self.private_banner.setStyleSheet("QLabel#incognitoBanner{background:#30343b;color:#f2f3f5;padding:8px 14px;border-bottom:1px solid #4b515a;font-weight:600;}")
+            main_layout.addWidget(self.private_banner)
         self.tab_bar = TabBar(central_widget)
         main_layout.addWidget(self.tab_bar)
 
         # 2. Tab Manager
         self.tab_manager = TabManager(
-            default_url=DEFAULT_START_URL,
+            default_url="lightmq://incognito/" if self._is_private else DEFAULT_START_URL,
             profile=self._profile,
             is_private=self._is_private,
             parent=self,
@@ -210,7 +254,7 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.stacked_widget)
 
         # 3b. Reusable DevTools Panel
-        self.devtools_panel = DevToolsPanel(self.splitter)
+        self.devtools_panel = DevToolsPanel(self.splitter,profile=self._profile)
         self.devtools_panel.hide()
         self.splitter.addWidget(self.devtools_panel)
 
@@ -231,6 +275,9 @@ class MainWindow(QMainWindow):
         # 6. Bookmarks Bar (Toggled with Ctrl+Shift+B, hidden by default)
         self.bookmarks_bar = BookmarksBar(parent=central_widget)
         self.bookmarks_bar.open_url_requested.connect(self.navigate_to)
+        self.bookmarks_bar.open_new_tab_requested.connect(self._open_bookmark_new_tab)
+        self.bookmarks_bar.edit_requested.connect(self.edit_bookmark)
+        self.bookmarks_bar.manager_requested.connect(self.open_bookmark_manager)
         self.bookmarks_bar.setVisible(
             not self._is_private and self._settings.value("bookmarks_bar_visible", False, type=bool)
         )
@@ -286,11 +333,37 @@ class MainWindow(QMainWindow):
         self.address_bar.navigate_requested.connect(self.navigate_to)
         self.toolbar.addWidget(self.address_bar)
 
+        self.btn_bookmark = QToolButton(self)
+        self.btn_bookmark.setText("☆")
+        self.btn_bookmark.setToolTip("Bookmark this page (Ctrl+D)")
+        self.btn_bookmark.clicked.connect(self.open_bookmark_editor)
+        self.toolbar.addWidget(self.btn_bookmark)
+        self.btn_saved_bookmarks=QToolButton(self)
+        self.btn_saved_bookmarks.setText("Bookmarks")
+        self.btn_saved_bookmarks.setToolTip("Open a saved bookmark")
+        self.btn_saved_bookmarks.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_saved_bookmarks.setVisible(True)
+        self.saved_bookmarks_menu=QMenu(self.btn_saved_bookmarks)
+        self.btn_saved_bookmarks.setMenu(self.saved_bookmarks_menu)
+        self.toolbar.addWidget(self.btn_saved_bookmarks)
+        bookmark_manager=BookmarkManager.get_instance()
+        bookmark_manager.bookmarks_changed.connect(
+            lambda: self._update_bookmark_button(self.web_view.url().toString()) if self.web_view else None
+        )
+        bookmark_manager.bookmarks_changed.connect(self._refresh_saved_bookmarks_menu)
+        self._refresh_saved_bookmarks_menu()
+
         # Go Button
         self.btn_go = QPushButton("Go", self)
         self.btn_go.setToolTip("Navigate to URL")
         self.btn_go.clicked.connect(self._on_go_clicked)
         self.toolbar.addWidget(self.btn_go)
+
+        browser_menu=QMenu(self)
+        browser_menu.addAction("New Incognito Window",self.new_private_window)
+        self.btn_browser_menu=QToolButton(self);self.btn_browser_menu.setText("Menu");self.btn_browser_menu.setToolTip("Browser menu")
+        self.btn_browser_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup);self.btn_browser_menu.setMenu(browser_menu)
+        self.toolbar.addWidget(self.btn_browser_menu)
 
         # DevTools Toggle Button
         self.btn_devtools = QPushButton("DevTools", self)
@@ -324,6 +397,10 @@ class MainWindow(QMainWindow):
             self.btn_startup_settings.clicked.connect(self.open_startup_settings)
             self.toolbar.addWidget(self.btn_startup_settings)
 
+        self.btn_settings = QPushButton("Settings", self)
+        self.btn_settings.clicked.connect(self.open_settings)
+        self.toolbar.addWidget(self.btn_settings)
+
     def _build_statusbar(self) -> None:
         """Configure the bottom status bar and loading progress bar."""
         self.status_bar = QStatusBar(self)
@@ -343,11 +420,19 @@ class MainWindow(QMainWindow):
         self.tab_manager.tab_closed.connect(self._on_tab_closed)
         self.tab_manager.current_changed.connect(self._on_current_tab_changed)
         self.tab_manager.tab_moved.connect(self._on_tab_moved)
+        self.tab_manager.tab_order_changed.connect(self._sync_tab_order)
+        self.tab_manager.group_manager.groups_changed.connect(self._sync_group_headers)
+        self.tab_manager.group_manager.group_changed.connect(lambda _group_id: self._sync_group_headers())
+        self.tab_manager.state_changed.connect(self._sync_group_visibility)
 
         self.tab_bar.tab_close_requested.connect(self.tab_manager.close_tab)
         self.tab_bar.current_changed.connect(self.tab_manager.set_current_index)
-        self.tab_bar.new_tab_requested.connect(lambda: self.tab_manager.create_tab(DEFAULT_START_URL))
+        self.tab_bar.new_tab_requested.connect(self.new_tab)
         self.tab_bar.tab_moved.connect(self.tab_manager.move_tab)
+        self.tab_bar.tab_context_requested.connect(self._show_tab_context_menu)
+        self.tab_bar.group_context_requested.connect(self._show_group_context_menu)
+        self.tab_bar.group_toggle_requested.connect(self._toggle_group)
+        self.tab_bar.group_reorder_requested.connect(self.tab_manager.reorder_group)
 
     def _init_shortcuts(self) -> None:
         """Register all default keyboard shortcuts through the ShortcutManager."""
@@ -360,8 +445,14 @@ class MainWindow(QMainWindow):
 
     def _on_tab_created(self, index: int, view: WebView) -> None:
         """Handle new tab creation: add to stacked widget and connect WebEngine signals."""
+        view.setZoomFactor(self._browser_settings.default_zoom())
         self.stacked_widget.insertWidget(index, view)
-        self.tab_bar.insert_tab(index, getattr(view, "restored_title", "") or "New Tab")
+        tab_id = self.tab_manager.tab_id_for(view) or ""
+        self.tab_bar.insert_tab(index, getattr(view, "restored_title", "") or "New Tab", view.icon())
+        self.tab_bar.set_tab_id(index, tab_id)
+        self.tab_bar.set_pinned(index, self.tab_manager.is_pinned(view))
+        self._sync_group_headers()
+        self._sync_group_visibility()
 
         # Connect signals for independent tab state updates
         view.titleChanged.connect(lambda title, v=view: self._on_tab_title_changed(v, title))
@@ -400,6 +491,7 @@ class MainWindow(QMainWindow):
         widget = self.stacked_widget.widget(index)
         if widget is not None:
             self.stacked_widget.removeWidget(widget)
+        self._sync_group_headers()
 
     def _on_current_tab_changed(self, index: int, view: WebView) -> None:
         """Switch active tab: update UI, toolbar, address bar, find bar, and DevTools."""
@@ -415,6 +507,7 @@ class MainWindow(QMainWindow):
         # Update address bar and title for the newly active tab
         current_url = view.url()
         self.address_bar.set_url(current_url)
+        self._update_bookmark_button(current_url.toString())
 
         title = view.title()
         if title:
@@ -436,11 +529,114 @@ class MainWindow(QMainWindow):
             self.status_bar.clearMessage()
 
     def _on_tab_moved(self, from_index: int, to_index: int) -> None:
-        """Synchronize stacked widget when a tab is moved in the tab bar."""
-        widget = self.stacked_widget.widget(from_index)
-        if widget is not None:
-            self.stacked_widget.removeWidget(widget)
-            self.stacked_widget.insertWidget(to_index, widget)
+        """Synchronize widgets after model normalization of a drag."""
+        self._sync_tab_order()
+
+    def _sync_tab_order(self) -> None:
+        """Make both UI collections reflect the manager's stable-ID order."""
+        views = list(self.tab_manager.ordered_views())
+        ids = [self.tab_manager.tab_id_for(view) or "" for view in views]
+        self.tab_bar.sync_order(ids)
+        for index, view in enumerate(views):
+            self.stacked_widget.removeWidget(view)
+            self.stacked_widget.insertWidget(index, view)
+        active = self.tab_manager.current_view()
+        if active is not None:
+            self.stacked_widget.setCurrentWidget(active)
+            self.tab_bar.set_current_index(self.tab_manager.index_of(active))
+        for index, view in enumerate(views):
+            self.tab_bar.set_pinned(index, self.tab_manager.is_pinned(view))
+
+    def _sync_group_headers(self) -> None:
+        groups = self.tab_manager.group_manager.groups()
+        self.tab_bar.set_groups(groups)
+        self._sync_group_visibility()
+
+    def _sync_group_visibility(self) -> None:
+        for index, view in enumerate(self.tab_manager.ordered_views()):
+            self.tab_bar.set_tab_visible(index, self.tab_manager.is_tab_visible(view))
+
+    def _toggle_group(self, group_id: str) -> None:
+        group = self.tab_manager.group_manager.group(group_id)
+        if group:
+            self.tab_manager.collapse_group(group_id, not group.collapsed)
+
+    def _show_tab_context_menu(self, index: int, global_pos: QPoint) -> None:
+        view = self.tab_manager.view_at(index)
+        if view is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("New Tab", self.new_tab)
+        menu.addAction("Reload", view.reload)
+        menu.addAction("Duplicate Tab", lambda: self.tab_manager.duplicate_tab(self.tab_manager.index_of(view)))
+        pinned = self.tab_manager.is_pinned(view)
+        menu.addAction("Unpin Tab" if pinned else "Pin Tab", lambda: self._toggle_pin(view))
+        group = self.tab_manager.group_manager.group_for_tab(self.tab_manager.tab_id_for(view))
+        group_menu = menu.addMenu("Add Tab to Group")
+        group_menu.setEnabled(not pinned)
+        group_menu.addAction("New Group…", lambda: self._create_group_for(view))
+        if self.tab_manager.group_manager.groups():
+            group_menu.addSeparator()
+        for item in self.tab_manager.group_manager.groups():
+            group_menu.addAction(item.name, lambda _checked=False, gid=item.id, v=view: self.tab_manager.add_tab_to_group(v, gid))
+        remove = menu.addAction("Remove from Group", lambda: self.tab_manager.remove_tab_from_group(view))
+        remove.setEnabled(group is not None)
+        menu.addSeparator()
+        reopen = menu.addAction("Reopen Closed Tab", self.restore_closed_tab)
+        reopen.setEnabled(self.tab_manager.closed_tabs_count() > 0)
+        menu.addAction("Close Tab", lambda: self.tab_manager.close_tab(self.tab_manager.index_of(view), force=True))
+        menu.addAction("Close Other Tabs", lambda: self.tab_manager.close_other_tabs(self.tab_manager.index_of(view)))
+        menu.addAction("Close Tabs to the Right", lambda: self.tab_manager.close_tabs_to_right(self.tab_manager.index_of(view)))
+        menu.exec(global_pos)
+
+    def _toggle_pin(self, view: WebView) -> None:
+        if self.tab_manager.is_pinned(view):
+            self.tab_manager.unpin_tab(view)
+        else:
+            self.tab_manager.pin_tab(view)
+        self._sync_tab_order()
+
+    def _create_group_for(self, view: WebView) -> None:
+        name, accepted = QInputDialog.getText(self, "New Tab Group", "Group name:")
+        if not accepted or not name.strip():
+            return
+        color_menu = QMenu(self)
+        for color in GROUP_COLORS:
+            color_menu.addAction(color.title(), lambda _checked=False, c=color: self.tab_manager.create_group(name, c, view))
+        color_menu.exec(self.mapToGlobal(self.rect().center()))
+
+    def _show_group_context_menu(self, group_id: str, global_pos: QPoint) -> None:
+        group = self.tab_manager.group_manager.group(group_id)
+        if group is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Rename Group…", lambda: self._rename_group(group_id))
+        colors = menu.addMenu("Change Color")
+        for color in GROUP_COLORS:
+            colors.addAction(color.title(), lambda _checked=False, c=color: self.tab_manager.group_manager.set_color(group_id, c))
+        menu.addAction("Expand Group" if group.collapsed else "Collapse Group", lambda: self.tab_manager.collapse_group(group_id, not group.collapsed))
+        menu.addAction("New Tab in Group", lambda: self.tab_manager.create_tab(DEFAULT_START_URL, group_id=group_id))
+        menu.addAction("Ungroup", lambda: self.tab_manager.ungroup(group_id))
+        menu.addSeparator()
+        close = menu.addAction("Close Group", lambda: self._close_group(group_id))
+        close.setEnabled(bool(group.tab_ids))
+        menu.exec(global_pos)
+
+    def _rename_group(self, group_id: str) -> None:
+        group = self.tab_manager.group_manager.group(group_id)
+        if group is None:
+            return
+        name, accepted = QInputDialog.getText(self, "Rename Tab Group", "Group name:", text=group.name)
+        if accepted and name.strip():
+            self.tab_manager.group_manager.rename_group(group_id, name)
+
+    def _close_group(self, group_id: str) -> None:
+        group = self.tab_manager.group_manager.group(group_id)
+        if group is None:
+            return
+        if len(group.tab_ids) > 1 and QMessageBox.question(self, "Close Tab Group", f"Close all {len(group.tab_ids)} tabs in ‘{group.name}’?") != QMessageBox.StandardButton.Yes:
+            return
+        self.tab_manager.close_group(group_id)
 
     # --------------------------------------------------------------------------
     # WebEngine Event Handlers (Dispatched with view context)
@@ -475,6 +671,11 @@ class MainWindow(QMainWindow):
         idx = self.tab_manager.index_of(view)
         if idx != -1 and not icon.isNull():
             self.tab_bar.set_tab_icon(idx, icon)
+        if view is self.tab_manager.current_view() and not self._is_private:
+            item=BookmarkManager.get_instance().find_by_url(view.url().toString())
+            if item:
+                reference=view.iconUrl().toString()
+                if reference:BookmarkManager.get_instance().set_favicon(item.id,reference)
 
     def _on_tab_url_changed(self, view: WebView, url: QUrl) -> None:
         """Update tab tooltip and, if active, update the address bar."""
@@ -484,6 +685,7 @@ class MainWindow(QMainWindow):
 
         if view is self.tab_manager.current_view():
             self.address_bar.set_url(url)
+            self._update_bookmark_button(url.toString())
             self._update_navigation_actions(view)
 
     def _on_tab_load_started(self, view: WebView) -> None:
@@ -555,7 +757,13 @@ class MainWindow(QMainWindow):
         """Instruct the active tab to navigate to the normalized target URL."""
         active_view = self.tab_manager.current_view()
         if active_view is not None:
-            target_url = normalize_url(text)
+            value = text.strip()
+            explicit_scheme = value.lower().startswith(("http://", "https://", "file://", "about:", "lightmq:"))
+            looks_url = explicit_scheme or (
+                " " not in value
+                and ("." in value or value.startswith(("localhost", "127.0.0.1", "[")))
+            )
+            target_url = normalize_url(value) if looks_url else QUrl(self._browser_settings.search_url(value))
             self.status_bar.showMessage(f"Navigating to {target_url.toString()}...", 2000)
             active_view.navigate(target_url)
 
@@ -618,7 +826,11 @@ class MainWindow(QMainWindow):
 
     def new_tab(self) -> WebView:
         """Open a new tab with the default start page."""
-        return self.tab_manager.create_tab(DEFAULT_START_URL, activate=True)
+        if self._is_private:
+            return self.tab_manager.create_tab("lightmq://incognito/", activate=True)
+        behavior = str(self._browser_settings.get("general/new_tab_behavior", "LightMq Start Page"))
+        url = "about:blank" if behavior == "Blank Page" else self._startup_settings.homepage() if behavior == "Homepage" else DEFAULT_START_URL
+        return self.tab_manager.create_tab(url, activate=True)
 
     def close_tab(self) -> None:
         """Close the currently active tab."""
@@ -641,7 +853,7 @@ class MainWindow(QMainWindow):
 
     def new_private_window(self) -> "MainWindow":
         """Open an isolated private browsing window."""
-        win = MainWindow(initial_url=DEFAULT_START_URL, is_private=True)
+        win = MainWindow(initial_url="lightmq://incognito/", is_private=True)
         win.show()
         return win
 
@@ -674,6 +886,8 @@ class MainWindow(QMainWindow):
         view = self.tab_manager.current_view()
         if view is None:
             return
+        if self._is_private and not self._confirm_persistent_private_bookmark():
+            return
 
         url = view.url().toString()
         title = view.title() or url
@@ -681,10 +895,82 @@ class MainWindow(QMainWindow):
 
         if not manager.is_bookmarked(url):
             if manager.add_bookmark(title, url):
-                self.status_bar.showMessage(f"Bookmark added: {title}", 3000)
+                self.status_bar.showMessage(f"Bookmark saved outside Incognito: {title}" if self._is_private else f"Bookmark added: {title}", 4000)
         else:
-            self._bookmark_dialog = BookmarkDialog(title, url, bookmark_manager=manager, parent=self)
+            self._bookmark_dialog = BookmarkDialog(title, url, bookmark_manager=manager, parent=self, item=manager.find_by_url(url))
             self._bookmark_dialog.show()
+
+    def _update_bookmark_button(self, url: str) -> None:
+        """Reflect the active page's bookmark state in the address toolbar."""
+        supported = BookmarkManager.normalize_url(url) is not None
+        bookmarked = supported and BookmarkManager.get_instance().is_bookmarked(url)
+        self.btn_bookmark.setEnabled(supported)
+        self.btn_bookmark.setText("★" if bookmarked else "☆")
+        self.btn_bookmark.setToolTip("Edit bookmark" if bookmarked else "Bookmark this page (Ctrl+D)")
+
+    def _refresh_saved_bookmarks_menu(self) -> None:
+        """Expose every saved item in a toolbar menu, regardless of bar visibility."""
+        if not hasattr(self,"saved_bookmarks_menu"):
+            return
+        menu=self.saved_bookmarks_menu
+        menu.clear()
+        manager=BookmarkManager.get_instance()
+        count=0
+        def add_items(target:QMenu,parent_id:int)->None:
+            nonlocal count
+            for item in manager.children(parent_id):
+                if item.is_folder:
+                    submenu=target.addMenu(item.title)
+                    add_items(submenu,item.id)
+                elif item.url:
+                    target.addAction(item.title,lambda _checked=False,url=item.url:self.navigate_to(url))
+                    count+=1
+        for root in manager.roots():
+            submenu=menu.addMenu(root.title)
+            add_items(submenu,root.id)
+            if submenu.isEmpty():
+                empty=submenu.addAction("No bookmarks in this folder")
+                empty.setEnabled(False)
+        if count==0:
+            empty=menu.addAction("No saved bookmarks yet")
+            empty.setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("Bookmark this page…",self.open_bookmark_editor)
+        if not self._is_private:
+            menu.addAction("Manage bookmarks…",self.open_bookmark_manager)
+
+    def open_bookmark_editor(self) -> None:
+        """Open the add/edit dialog for the active HTTP(S) page."""
+        view=self.tab_manager.current_view()
+        if view is None:return
+        if self._is_private and not self._confirm_persistent_private_bookmark():return
+        url=view.url().toString(); manager=BookmarkManager.get_instance()
+        dialog=BookmarkDialog(view.title() or url,url,manager,self,item=manager.find_by_url(url))
+        self._bookmark_dialog=dialog;dialog.show()
+
+    def _confirm_persistent_private_bookmark(self)->bool:
+        """Explain that explicitly saved Incognito bookmarks remain afterward."""
+        return QMessageBox.question(self,"Save Bookmark Outside Incognito?","This bookmark will be saved to LightMq and remain available after the Incognito session ends. Continue?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)==QMessageBox.StandardButton.Yes
+
+    def edit_bookmark(self, item_id: int) -> None:
+        item=BookmarkManager.get_instance().get_item(item_id)
+        if item and not item.is_folder and item.url:
+            self._bookmark_dialog=BookmarkDialog(item.title,item.url,parent=self,item=item)
+            self._bookmark_dialog.show()
+
+    def _open_bookmark_new_tab(self,url:str)->None:
+        self.tab_manager.create_tab(url,activate=True)
+
+    def open_bookmark_manager(self) -> BookmarkManagerDialog | None:
+        """Show or raise the window-scoped Bookmark Manager."""
+        if self._is_private:return None
+        dialog=getattr(self,"_bookmark_manager_dialog",None)
+        if dialog is None:
+            dialog=BookmarkManagerDialog(parent=self)
+            dialog.open_url_requested.connect(lambda url,new_tab:self._open_bookmark_new_tab(url) if new_tab else self.navigate_to(url))
+            dialog.finished.connect(lambda _result:setattr(self,"_bookmark_manager_dialog",None))
+            self._bookmark_manager_dialog=dialog
+        dialog.show();dialog.raise_();dialog.activateWindow();return dialog
 
     def print_current_page(self) -> None:
         """Print the active tab's webpage."""
@@ -786,6 +1072,21 @@ class MainWindow(QMainWindow):
         dialog.activateWindow()
         return dialog
 
+    def open_settings(self) -> SettingsWindow:
+        """Show or raise the existing centralized Settings window."""
+        dialog = getattr(self, "_settings_window", None)
+        if dialog is None:
+            dialog = SettingsWindow(self._browser_settings, self._startup_settings, self)
+            dialog.finished.connect(lambda _result: setattr(self, "_settings_window", None))
+            self._settings_window = dialog
+        dialog.show(); dialog.raise_(); dialog.activateWindow()
+        return dialog
+
+    def _on_browser_setting_changed(self, key: str, value: object) -> None:
+        if key.startswith("appearance/"):
+            for window in tuple(MainWindow._all_windows):
+                if not window.is_private:window._theme_manager.apply()
+
     def _on_session_save_failed(self, message: str) -> None:
         """Surface session persistence errors without interrupting navigation."""
         self.status_bar.showMessage(message, 8000)
@@ -871,6 +1172,9 @@ class MainWindow(QMainWindow):
         if not self._is_private:
             self._settings.setValue("bookmarks_bar_visible", visible)
 
+    def _open_bookmark_manager_shortcut(self) -> None:
+        self.open_bookmark_manager()
+
     def toggle_fullscreen(self) -> None:
         """Toggle window fullscreen mode, preserving previous maximized state."""
         if self.isFullScreen():
@@ -914,19 +1218,21 @@ class MainWindow(QMainWindow):
         self.devtools_manager.toggle()
 
     def open_js_console(self) -> None:
-        """Open Developer Tools and focus the inspector panel."""
+        """Open LightMq's bounded page console."""
         if not self.devtools_manager.is_open():
             self.devtools_manager.open()
-        self.devtools_panel.setFocus()
+        self.devtools_panel.mode.setCurrentIndex(1)
+        self.devtools_panel.tools.setCurrentWidget(self.devtools_panel.console)
+        self.devtools_panel.console.command.setFocus()
         self.status_bar.showMessage("Opened Developer Tools Console", 2000)
 
     def activate_inspect_element(self) -> None:
-        """Activate element inspection and open Developer Tools."""
-        view = self.tab_manager.current_view()
-        if view is not None:
-            view.triggerPageAction(QWebEnginePage.WebAction.InspectElement)
+        """Open LightMq's non-persistent element picker."""
         if not self.devtools_manager.is_open():
             self.devtools_manager.open()
+        self.devtools_panel.mode.setCurrentIndex(1)
+        self.devtools_panel.tools.setCurrentWidget(self.devtools_panel.dom)
+        self.devtools_panel.dom.start_picker()
         self.status_bar.showMessage("Inspect Element active", 2000)
 
     def view_page_source(self) -> None:

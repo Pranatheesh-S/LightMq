@@ -122,3 +122,35 @@ def test_tab_reordering():
     assert tm.view_at(2) is v0
     assert tm.current_view() is v0
     assert tm.current_index() == 2
+
+
+def test_pin_and_group_operations_preserve_web_view_objects():
+    tm = TabManager()
+    first = tm.create_tab("https://one.example")
+    second = tm.create_tab("https://two.example")
+    third = tm.create_tab("https://three.example")
+    group_id = tm.create_group("Work", "blue", second)
+    assert tm.view_for_tab_id(tm.tab_id_for(second)) is second
+    assert tm.add_tab_to_group(third, group_id)
+    assert tm.ordered_views()[1:] == (second, third)
+    assert tm.pin_tab(third)
+    assert tm.is_pinned(third)
+    assert tm.group_manager.group_id_for_tab(tm.tab_id_for(third)) is None
+    assert tm.ordered_views()[0] is third
+    assert tm.current_view() is third
+
+
+def test_pinned_close_guard_duplicate_and_recent_restore():
+    tm = TabManager()
+    original = tm.create_tab("https://example.com/path")
+    tm.pin_tab(original)
+    assert not tm.close_tab(tm.index_of(original))
+    tm.unpin_tab(original)
+    duplicate = tm.duplicate_tab(tm.index_of(original))
+    assert duplicate is not None
+    assert tm.index_of(duplicate) == 1
+    assert duplicate.url().toString() == original.url().toString()
+    assert tm.close_tab(tm.index_of(duplicate))
+    restored = tm.restore_closed_tab()
+    assert restored is not None
+    assert restored.url().toString() == "https://example.com/path"

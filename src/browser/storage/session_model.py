@@ -11,12 +11,17 @@ from PySide6.QtCore import QUrl, QUrlQuery
 
 from browser.utils.constants import DEFAULT_START_URL
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_TABS = 100
 SENSITIVE_QUERY_NAMES = {
     "access_token", "auth", "authorization", "code", "id_token", "key",
     "password", "refresh_token", "secret", "session", "token",
 }
+
+
+def _group_position(entry: dict[str, object]) -> int:
+    value = entry.get("position", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 @dataclass(frozen=True)
@@ -26,6 +31,19 @@ class SessionTab:
     tab_id: str
     url: str
     title: str
+    position: int
+    pinned: bool = False
+    group_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SessionGroup:
+    """Restorable presentation state for one tab group."""
+
+    group_id: str
+    name: str
+    color: str
+    collapsed: bool
     position: int
 
 
@@ -37,21 +55,32 @@ class SessionSnapshot:
     active_tab_id: str | None
     saved_at: str
     schema_version: int = SCHEMA_VERSION
+    groups: tuple[SessionGroup, ...] = ()
 
     @classmethod
     def create(
         cls,
         tabs: list[SessionTab] | tuple[SessionTab, ...],
         active_tab_id: str | None,
+        groups: list[SessionGroup] | tuple[SessionGroup, ...] = (),
     ) -> "SessionSnapshot":
         """Create an ordered snapshot with a UTC timestamp."""
         ordered = tuple(
-            SessionTab(tab.tab_id, tab.url, tab.title, position)
+            SessionTab(tab.tab_id, tab.url, tab.title, position, tab.pinned, tab.group_id)
             for position, tab in enumerate(tabs[:MAX_TABS])
+        )
+        valid_ids = {tab.tab_id for tab in ordered if not tab.pinned}
+        referenced_groups = {tab.group_id for tab in ordered if tab.group_id and not tab.pinned}
+        valid_groups = tuple(group for group in groups[:MAX_TABS] if group.group_id in referenced_groups)
+        memberships = {group.group_id for group in valid_groups}
+        ordered = tuple(
+            SessionTab(tab.tab_id, tab.url, tab.title, tab.position, tab.pinned,
+                       tab.group_id if tab.group_id in memberships and tab.tab_id in valid_ids else None)
+            for tab in ordered
         )
         if active_tab_id not in {tab.tab_id for tab in ordered}:
             active_tab_id = ordered[0].tab_id if ordered else None
-        return cls(ordered, active_tab_id, datetime.now(timezone.utc).isoformat())
+        return cls(ordered, active_tab_id, datetime.now(timezone.utc).isoformat(), SCHEMA_VERSION, valid_groups)
 
     def to_dict(self) -> dict[str, object]:
         """Serialize only URL/title/order metadata, never cookies or form data."""
@@ -65,15 +94,23 @@ class SessionSnapshot:
                     "url": tab.url,
                     "title": tab.title,
                     "position": tab.position,
+                    "pinned": tab.pinned,
+                    "group_id": tab.group_id,
                 }
                 for tab in self.tabs
+            ],
+            "groups": [
+                {"id": group.group_id, "name": group.name, "color": group.color,
+                 "collapsed": group.collapsed, "position": group.position}
+                for group in self.groups
             ],
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "SessionSnapshot":
         """Validate and sanitize untrusted JSON before it reaches WebEngine."""
-        if data.get("schema_version") != SCHEMA_VERSION:
+        version = data.get("schema_version")
+        if version not in {1, SCHEMA_VERSION}:
             raise ValueError("Unsupported session schema")
         raw_tabs = data.get("tabs")
         if not isinstance(raw_tabs, list):
@@ -100,11 +137,36 @@ class SessionSnapshot:
                 title = ""
             if isinstance(position, bool) or not isinstance(position, int) or position < 0:
                 position = len(tabs)
-            tabs.append(SessionTab(tab_id, safe_url, title[:512], position))
+            pinned = raw.get("pinned", False) if version >= 2 else False
+            if not isinstance(pinned, bool):
+                pinned = False
+            group_id = raw.get("group_id") if version >= 2 else None
+            if not isinstance(group_id, str) or not group_id:
+                group_id = None
+            tabs.append(SessionTab(tab_id, safe_url, title[:512], position, pinned, group_id))
             seen_ids.add(tab_id)
 
         tabs.sort(key=lambda tab: (tab.position, tab.tab_id))
-        tabs = [SessionTab(tab.tab_id, tab.url, tab.title, i) for i, tab in enumerate(tabs)]
+        raw_groups = data.get("groups", []) if version >= 2 else []
+        groups: list[SessionGroup] = []
+        seen_groups: set[str] = set()
+        if isinstance(raw_groups, list):
+            for raw in sorted((item for item in raw_groups if isinstance(item, dict)), key=_group_position):
+                group_id, name, color = raw.get("id"), raw.get("name"), raw.get("color")
+                if not all(isinstance(item, str) and item for item in (group_id, name, color)) or group_id in seen_groups:
+                    continue
+                groups.append(SessionGroup(group_id[:80], " ".join(name.split())[:40] or "Group",
+                                           color.lower() if color.lower() in {"grey", "blue", "red", "yellow", "green", "purple", "pink", "cyan"} else "blue",
+                                           bool(raw.get("collapsed", False)), len(groups)))
+                seen_groups.add(group_id)
+        group_ids = {group.group_id for group in groups}
+        clean_tabs = []
+        for i, tab in enumerate(tabs):
+            group_id = tab.group_id if tab.group_id in group_ids and not tab.pinned else None
+            clean_tabs.append(SessionTab(tab.tab_id, tab.url, tab.title, i, tab.pinned, group_id))
+        tabs = clean_tabs
+        referenced_groups = {tab.group_id for tab in tabs if tab.group_id}
+        groups = [group for group in groups if group.group_id in referenced_groups]
         ids = {tab.tab_id for tab in tabs}
         active = data.get("active_tab_id")
         if not isinstance(active, str) or active not in ids:
@@ -112,7 +174,7 @@ class SessionSnapshot:
         saved_at = data.get("saved_at")
         if not isinstance(saved_at, str):
             saved_at = ""
-        return cls(tuple(tabs), active, saved_at, SCHEMA_VERSION)
+        return cls(tuple(tabs), active, saved_at, SCHEMA_VERSION, tuple(groups))
 
     @staticmethod
     def sanitize_url(value: str) -> str | None:

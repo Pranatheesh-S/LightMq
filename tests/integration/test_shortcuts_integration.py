@@ -179,6 +179,27 @@ def test_bookmarks_bar_preference_persists_only_for_normal_windows():
         settings.setValue("bookmarks_bar_visible", previous)
 
 
+def test_bookmark_star_manager_and_shortcut_are_connected():
+    """The active page star follows SQLite changes and Ctrl+Shift+O opens manager."""
+    win=MainWindow()
+    url="https://bookmark-ui.example/path"
+    win._update_bookmark_button(url)
+    assert win.btn_bookmark.text()=="☆"
+    manager=BookmarkManager.get_instance()
+    manager.create_bookmark("Bookmark UI",url)
+    win._update_bookmark_button(url)
+    assert win.btn_bookmark.text()=="★"
+    menu_action=win.saved_bookmarks_menu.actions()[0]
+    bookmark_action=menu_action.menu().actions()[0]
+    assert bookmark_action.text()=="Bookmark UI"
+    bookmark_action.trigger()
+    assert win.web_view.url().toString()==url
+    assert win.shortcut_manager.is_registered("Ctrl+Shift+O")
+    dialog=win.open_bookmark_manager()
+    assert dialog is not None
+    dialog.close()
+
+
 def test_devtools_shortcuts():
     """Verify F12, Ctrl+Shift+I, Ctrl+Shift+J, Ctrl+Shift+C, Ctrl+U."""
     win = MainWindow()
@@ -222,7 +243,27 @@ def test_multi_window_and_private_browsing_shortcuts():
     win_priv = win1.new_private_window()
     assert win_priv is not None
     assert win_priv.is_private is True
-    assert "Private Browsing" in win_priv.windowTitle()
+    assert "Incognito" in win_priv.windowTitle()
+    assert win_priv._profile.isOffTheRecord()
+    assert win_priv._profile is not win1._profile
+    assert win_priv.web_view.url().toString()=="lightmq://incognito/"
+    assert win_priv._permission_handler is not None
+    assert win_priv.devtools_panel.get_page().profile() is win_priv._profile
+    pending_view=win_priv.web_view
+    win_priv._history_navigation_pending[pending_view]="typed"
+    win_priv._on_tab_load_finished(pending_view,True)
+    assert pending_view not in win_priv._history_urls_by_view
+    f12=win_priv.shortcut_manager.get_shortcut("F12")
+    assert f12 is not None
+    f12.activated.emit()
+    assert win_priv.devtools_manager.is_open()
+    private_new_tab=win_priv.new_tab()
+    assert private_new_tab.url().toString()=="lightmq://incognito/"
+    assert private_new_tab.page().profile() is win_priv._profile
+    shared_profile=win_priv._profile
+    win_priv2=win_priv.new_private_window()
+    assert win_priv2._profile is win_priv._profile
+    assert win_priv2.download_manager is win_priv.download_manager
 
     # 3. Isolation: tabs closed in private window never enter normal restore stack
     win_priv.navigate_to("https://secret.com/page")
@@ -235,4 +276,12 @@ def test_multi_window_and_private_browsing_shortcuts():
     win2.close()
     assert win2 not in MainWindow._all_windows
     win_priv.close()
+    assert win_priv2._profile is shared_profile
+    win_priv2.close()
     assert win_priv not in MainWindow._all_windows
+    manager=win_priv._private_manager
+    assert manager.active_profile is None
+    fresh_private=win1.new_private_window()
+    assert fresh_private._profile is not shared_profile
+    fresh_private.close()
+    win1.close()

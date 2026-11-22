@@ -17,6 +17,7 @@ class WebPage(QWebEnginePage):
     """Customized QWebEnginePage for LightMq browser."""
 
     main_frame_navigation_requested = Signal(str, str)
+    console_message = Signal(str, str, int, str)
 
     def __init__(self, profile=None, parent: QObject | None = None):
         if profile is not None:
@@ -97,13 +98,22 @@ class WebPage(QWebEnginePage):
         Returns:
             bool: False to reject navigation and protect the user.
         """
-        logger.warning(
-            "SSL Certificate Error on %s: %s (error code: %s)",
-            certificate_error.url().host(),
-            certificate_error.description(),
-            certificate_error.type(),
-        )
+        # Certificate diagnostics must not write Incognito destinations to the
+        # application's persistent logs.
+        if not self.profile().isOffTheRecord():
+            logger.warning(
+                "SSL Certificate Error on %s: %s (error code: %s)",
+                certificate_error.url().host(),
+                certificate_error.description(),
+                certificate_error.type(),
+            )
         return False
+
+    def javaScriptConsoleMessage(self, level, message: str, line_number: int, source_id: str) -> None:
+        """Forward bounded console metadata to attached developer tools UI."""
+        severity = getattr(level, "name", str(level)).replace("JavaScriptConsoleMessageLevel", "").lower()
+        self.console_message.emit(severity, message[:4000], int(line_number), source_id[:1000])
+        super().javaScriptConsoleMessage(level, message, line_number, source_id)
 
     def createWindow(self, window_type: QWebEnginePage.WebWindowType) -> QWebEnginePage | None:
         """Handle requests from web content to open a new window or tab.

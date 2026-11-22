@@ -1,5 +1,7 @@
 """Self-contained HTML content for LightMq's built-in new-tab page."""
 
+PRIVATE_START_URL="lightmq://incognito/"
+
 
 def new_tab_html() -> str:
     """Return the offline new-tab page with search and common site shortcuts."""
@@ -75,3 +77,9 @@ def new_tab_html() -> str:
   </script>
 </body>
 </html>"""
+
+
+def private_start_html() -> str:
+    """Return an offline Incognito landing page with accurate privacy limits."""
+    return r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Incognito - LightMq</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#202124;color:#e8eaed;font:16px 'Segoe UI',sans-serif;padding:24px;box-sizing:border-box}main{max-width:680px}h1{font-size:32px}p{line-height:1.6;color:#c4c7c5}.badge{color:#bdc1c6;background:#303134;border-radius:20px;padding:8px 14px;display:inline-block}.search{margin:24px 0}input{width:min(480px,65vw);padding:14px;border-radius:10px;border:1px solid #5f6368;background:#303134;color:white;font-size:16px}button{padding:14px 18px;border:0;border-radius:10px;background:#8ab4f8;color:#202124;font-weight:700}</style></head><body><main><span class="badge">◉ Incognito browsing</span><h1>You’re browsing privately</h1><p>LightMq won’t save pages you visit in this Incognito session to regular browsing history, and this session’s cookies and site storage are kept separate from normal browsing.</p><form class="search" onsubmit="event.preventDefault();let q=this.q.value.trim();if(q)location.href=/\s/.test(q)?'https://www.google.com/search?q='+encodeURIComponent(q):(/^https?:\/\//i.test(q)?q:'https://'+q)"><input name="q" placeholder="Search or enter an address" aria-label="Search or enter an address"><button>Go</button></form><p><strong>Downloads and bookmarks you choose to save remain on this device.</strong></p><p>Private browsing does not hide activity from websites, your internet provider, or an employer or network administrator. It does not provide VPN or Tor anonymity.</p></main></body></html>"""

@@ -55,6 +55,8 @@ class DevToolsManager(QObject):
 
         self._target_view = view
 
+        self._panel.set_target_view(view, view.page().profile() if view is not None else None)
+
         if self._target_view is not None:
             # Connect Inspect Element context menu action
             try:
@@ -100,6 +102,7 @@ class DevToolsManager(QObject):
         if self._target_view is view:
             self.detach()
             self._target_view = None
+            self._panel.set_target_view(None)
 
     def _on_inspect_triggered(self) -> None:
         """Handle Inspect Element action triggered from the web view context menu."""
@@ -135,5 +138,6 @@ class DevToolsManager(QObject):
 
     def close(self) -> None:
         """Hide the Developer Tools panel."""
+        self._panel.cancel_transient_tools()
         self._panel.hide()
         self.visibility_changed.emit(False)

@@ -81,22 +81,25 @@ def main() -> int:
     restore_snapshot = None
     initial_url = args.url
 
-    if initial_url is None and crashed and recovery_snapshot is not None:
-        prompt = QMessageBox()
-        prompt.setWindowTitle("Restore Previous Session?")
-        prompt.setIcon(QMessageBox.Icon.Warning)
-        prompt.setText("LightMq did not close normally last time.")
-        prompt.setInformativeText("Would you like to restore the last saved tabs?")
-        restore_button = prompt.addButton("Restore Tabs", QMessageBox.ButtonRole.AcceptRole)
-        prompt.addButton("Start Fresh", QMessageBox.ButtonRole.DestructiveRole)
-        prompt.setDefaultButton(restore_button)
-        prompt.exec()
-        if prompt.clickedButton() is restore_button:
-            restore_snapshot = recovery_snapshot
+    if initial_url is None and crashed:
+        if recovery_snapshot is not None:
+            prompt = QMessageBox()
+            prompt.setWindowTitle("Recover Previous Tabs?")
+            prompt.setIcon(QMessageBox.Icon.Warning)
+            prompt.setText("LightMq did not close normally last time.")
+            prompt.setInformativeText("Restore tabs from the crash recovery snapshot?")
+            restore_button = prompt.addButton("Restore Tabs", QMessageBox.ButtonRole.AcceptRole)
+            prompt.addButton("Start Fresh", QMessageBox.ButtonRole.DestructiveRole)
+            prompt.setDefaultButton(restore_button)
+            prompt.exec()
+            if prompt.clickedButton() is restore_button:
+                restore_snapshot = recovery_snapshot
+            else:
+                initial_url = _startup_url(startup_settings)
         else:
             initial_url = _startup_url(startup_settings)
     elif initial_url is None:
-        if startup_settings.mode() is StartupMode.CONTINUE:
+        if startup_settings.restore_previous_session():
             repository = session_manager.repository
             restore_snapshot = repository.load_current() or repository.load_recovery()
         else:
@@ -114,7 +117,7 @@ def main() -> int:
 
 def _startup_url(settings: StartupSettings) -> str:
     """Return the initial page selected in startup preferences."""
-    if settings.mode() is StartupMode.HOMEPAGE:
+    if settings.fallback_mode() is StartupMode.HOMEPAGE:
         return settings.homepage()
     from browser.utils.constants import DEFAULT_START_URL
 

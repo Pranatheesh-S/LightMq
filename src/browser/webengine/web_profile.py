@@ -17,6 +17,17 @@ class WebProfileManager:
     PROFILE_NAME = "Default"
     _profile: QWebEngineProfile | None = None
 
+    @staticmethod
+    def create_off_the_record_profile(parent) -> QWebEngineProfile:
+        """Create a memory-only WebEngine profile with no regular profile paths."""
+        profile=QWebEngineProfile(parent)
+        if not profile.isOffTheRecord():
+            profile.deleteLater()
+            raise RuntimeError("Qt did not create an off-the-record profile")
+        profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
+        profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
+        return profile
+
     @classmethod
     def data_root(cls) -> Path:
         """Return the stable application data root for the current platform."""
