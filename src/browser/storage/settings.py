@@ -124,7 +124,7 @@ class BrowserSettings(QObject):
     """Typed shared preference access backed by the existing QSettings store."""
 
     changed = Signal(str, object)
-    THEMES = ("light", "dark", "system")
+    THEMES = ("light", "dark", "system", "custom")
     ACCENTS = {"blue": "#1A73E8", "green": "#188038", "purple": "#9334E6", "red": "#D93025", "orange": "#E8710A", "cyan": "#007B83", "grey": "#80868B"}
     ZOOMS = (50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200)
 
@@ -143,6 +143,17 @@ class BrowserSettings(QObject):
     def theme(self) -> str:
         value = str(self.get("appearance/theme", "system")).lower()
         return value if value in self.THEMES else "system"
+
+    def custom_theme_color(self) -> str:
+        """Return the validated user-selected base color for Custom mode."""
+        from PySide6.QtGui import QColor
+        value=str(self.get("appearance/custom_base_color", self.ACCENTS[self.accent()]))
+        return value if QColor(value).isValid() else self.ACCENTS["blue"]
+
+    def custom_theme_brightness(self) -> str:
+        """Return the saved custom palette surface mode."""
+        value=str(self.get("appearance/custom_brightness", "dark")).lower()
+        return value if value in {"light","dark"} else "dark"
 
     def accent(self) -> str:
         value = str(self.get("appearance/accent_color", "blue")).lower()
@@ -163,10 +174,17 @@ class BrowserSettings(QObject):
         from urllib.parse import quote_plus
         templates = {"Google": "https://www.google.com/search?q={searchTerms}", "Bing": "https://www.bing.com/search?q={searchTerms}", "DuckDuckGo": "https://duckduckgo.com/?q={searchTerms}", "Brave Search": "https://search.brave.com/search?q={searchTerms}"}
         provider = self.search_provider()
+        template = self.search_template()
+        return template.replace("{searchTerms}", quote_plus(query))
+
+    def search_template(self) -> str:
+        """Return the validated search URL template for the current provider."""
+        templates = {"Google": "https://www.google.com/search?q={searchTerms}", "Bing": "https://www.bing.com/search?q={searchTerms}", "DuckDuckGo": "https://duckduckgo.com/?q={searchTerms}", "Brave Search": "https://search.brave.com/search?q={searchTerms}"}
+        provider=self.search_provider()
         template = str(self.get("search/custom_template", "https://www.google.com/search?q={searchTerms}")) if provider == "Custom" else templates[provider]
         if not self.valid_custom_template(template):
             template = templates["Google"]
-        return template.replace("{searchTerms}", quote_plus(query))
+        return template
 
     @staticmethod
     def valid_custom_template(template: str) -> bool:

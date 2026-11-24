@@ -11,20 +11,22 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QPushButton,
     QWidget,
 )
 from PySide6.QtWebEngineCore import QWebEngineFindTextResult, QWebEnginePage
 
+from browser.ui.icons.icon_button import IconButton
+from browser.ui.theme_palette import BrowserTheme
 from browser.webengine.web_view import WebView
 
 
 class FindBar(QWidget):
     """Find in page floating toolbar widget."""
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, icon_theme: BrowserTheme | None = None):
         super().__init__(parent)
         self._active_view: WebView | None = None
+        self._icon_theme=icon_theme
         self._init_ui()
         self.hide()
 
@@ -49,16 +51,12 @@ class FindBar(QWidget):
         layout.addWidget(self.label_matches)
 
         # Previous Match Button
-        self.btn_prev = QPushButton("▲", self)
-        self.btn_prev.setToolTip("Previous match (Shift+Enter)")
-        self.btn_prev.setFixedWidth(28)
+        self.btn_prev = IconButton("arrow-up","Previous match (Shift+Enter)",self,button_size=28,icon_size=16,theme=self._icon_theme)
         self.btn_prev.clicked.connect(self.find_prev)
         layout.addWidget(self.btn_prev)
 
         # Next Match Button
-        self.btn_next = QPushButton("▼", self)
-        self.btn_next.setToolTip("Next match (Enter)")
-        self.btn_next.setFixedWidth(28)
+        self.btn_next = IconButton("arrow-down","Next match (Enter)",self,button_size=28,icon_size=16,theme=self._icon_theme)
         self.btn_next.clicked.connect(self.find_next)
         layout.addWidget(self.btn_next)
 
@@ -70,9 +68,7 @@ class FindBar(QWidget):
         layout.addStretch()
 
         # Close Button
-        self.btn_close = QPushButton("✕", self)
-        self.btn_close.setToolTip("Close (Esc)")
-        self.btn_close.setFixedWidth(28)
+        self.btn_close = IconButton("close","Close (Esc)",self,button_size=28,icon_size=16,theme=self._icon_theme)
         self.btn_close.clicked.connect(self.close_and_clear)
         layout.addWidget(self.btn_close)
 

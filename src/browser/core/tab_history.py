@@ -37,6 +37,16 @@ class TabHistory:
         """Return and remove the most recently closed tab."""
         return self._closed.pop() if self._closed else None
 
+    def items(self) -> tuple[ClosedTab, ...]:
+        """Return recently closed tabs, newest first, without removing them."""
+        return tuple(reversed(self._closed))
+
+    def take(self, tab: ClosedTab) -> ClosedTab | None:
+        """Remove a selected closed tab from the stack."""
+        try:self._closed.remove(tab)
+        except ValueError:return None
+        return tab
+
     def clear(self) -> None:
         """Clear all recently closed metadata."""
         self._closed.clear()

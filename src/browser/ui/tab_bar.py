@@ -2,9 +2,13 @@
 
 from PySide6.QtCore import Qt, Signal, QPoint, QEvent, QObject, QMimeData
 from PySide6.QtGui import QIcon, QDrag, QDragEnterEvent, QDragMoveEvent, QDropEvent, QMouseEvent
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QTabBar, QToolButton, QVBoxLayout, QWidget, QMenu, QApplication
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QTabBar, QToolButton, QVBoxLayout, QWidget, QMenu, QApplication, QSizePolicy
+from PySide6.QtCore import QSize
 
 from browser.core.tab_group_manager import TabGroup
+from browser.ui.icons.icon_button import IconButton
+from browser.ui.icons.icon_manager import IconManager
+from browser.ui.theme_palette import BrowserTheme
 
 
 class _GroupHeaderRow(QWidget):
@@ -43,15 +47,18 @@ class TabBar(QWidget):
     group_context_requested = Signal(str, QPoint)
     group_toggle_requested = Signal(str)
     group_reorder_requested = Signal(str, int)
+    tab_list_requested = Signal()
 
     MAX_TITLE_LENGTH = 28
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, icon_theme: BrowserTheme | None = None):
         super().__init__(parent)
+        self._icon_theme=icon_theme
         self._tab_ids: dict[int, str] = {}
         self._pinned: dict[str, bool] = {}
         self._titles: dict[str, str] = {}
         self._groups = ()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Fixed)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 2, 6, 0)
         outer.setSpacing(0)
@@ -64,6 +71,8 @@ class TabBar(QWidget):
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
+        self.tab_list_button=IconButton("tab-search","Search tabs and recently closed pages",self,button_size=30,icon_size=18,theme=self._icon_theme)
+        self.tab_list_button.setFixedSize(30,28)
         self._tab_bar = QTabBar(self)
         self._tab_bar.setTabsClosable(False)
         self._tab_bar.setMovable(True)
@@ -72,9 +81,10 @@ class TabBar(QWidget):
         self._tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
         self._tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tab_bar.customContextMenuRequested.connect(self._show_tab_context)
-        self._btn_new = QPushButton("+", self)
-        self._btn_new.setToolTip("New Tab (Ctrl+T)")
-        self._btn_new.setFixedSize(26, 26)
+        self._btn_new = IconButton("plus","New Tab (Ctrl+T)",self,button_size=28,icon_size=17,theme=self._icon_theme)
+        row.addWidget(self.tab_list_button)
+        self._tab_bar.setSizePolicy(QSizePolicy.Policy.Preferred,QSizePolicy.Policy.Fixed)
+        self._tab_bar.setMinimumWidth(72)
         row.addWidget(self._tab_bar)
         row.addWidget(self._btn_new)
         row.addStretch()
@@ -83,9 +93,14 @@ class TabBar(QWidget):
         self._tab_bar.currentChanged.connect(self.current_changed.emit)
         self._tab_bar.tabMoved.connect(self.tab_moved.emit)
         self._btn_new.clicked.connect(self.new_tab_requested.emit)
+        self.tab_list_button.clicked.connect(self.tab_list_requested.emit)
 
     def count(self) -> int:
         return self._tab_bar.count()
+
+    def sizeHint(self)->QSize:
+        """Keep the strip compact while reserving one extra row for groups."""
+        return QSize(680,42+(22 if self._groups else 0))
 
     def current_index(self) -> int:
         return self._tab_bar.currentIndex()
@@ -177,7 +192,9 @@ class TabBar(QWidget):
                 widget.deleteLater()
         for position, group in enumerate(self._groups):
             collapsed = (collapsed_by_id or {}).get(group.id, group.collapsed)
-            button = QPushButton(("▸ " if collapsed else "▾ ") + group.name[:18], self._groups_row)
+            button = QPushButton(group.name[:18], self._groups_row)
+            IconManager.set_widget_icon(button,"chevron-right" if collapsed else "chevron-down",14,self._icon_theme)
+            button.setIconSize(QSize(14,14))
             button.setToolTip(f"{group.name} tab group")
             button.setStyleSheet(f"QPushButton{{border:1px solid {group.color};border-radius:8px;padding:2px 8px;color:{group.color};font-weight:600;}}")
             button.clicked.connect(lambda _checked=False, group_id=group.id: self.group_toggle_requested.emit(group_id))
@@ -190,6 +207,7 @@ class TabBar(QWidget):
             self._groups_layout.addWidget(button)
         self._groups_layout.addStretch()
         self._groups_row.setVisible(bool(self._groups))
+        self.updateGeometry()
 
     def _show_tab_context(self, pos: QPoint) -> None:
         index = self._tab_bar.tabAt(pos)
@@ -214,10 +232,7 @@ class TabBar(QWidget):
     def _install_close_button(self, index: int) -> None:
         if self._tab_bar.tabButton(index, QTabBar.ButtonPosition.RightSide) is not None:
             return
-        button = QToolButton(self._tab_bar)
-        button.setText("×")
-        button.setAutoRaise(True)
-        button.setFixedSize(18, 18)
+        button = IconButton("close","Close tab",self._tab_bar,button_size=20,icon_size=13,theme=self._icon_theme)
         button.clicked.connect(lambda _checked=False, b=button: self._close_button_clicked(b))
         self._tab_bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, button)
 

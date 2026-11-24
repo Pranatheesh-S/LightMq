@@ -1,85 +1,59 @@
-"""Self-contained HTML content for LightMq's built-in new-tab page."""
+"""Self-contained, theme-aware HTML for LightMq's built-in start pages."""
+
+from __future__ import annotations
+
+import json
+
+from PySide6.QtGui import QColor
+from browser.ui.theme_palette import contrast_text
 
 PRIVATE_START_URL="lightmq://incognito/"
 
 
-def new_tab_html() -> str:
-    """Return the offline new-tab page with search and common site shortcuts."""
-    return r"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>New Tab - LightMq</title>
-  <style>
-    :root { color-scheme: dark; font-family: "Segoe UI", Arial, sans-serif; }
-    * { box-sizing: border-box; }
-    body {
-      min-height: 100vh; margin: 0; color: #f4f6fb;
-      background: radial-gradient(ellipse at 50% 38%, #203342 0, #151d26 45%, #101318 100%);
-      display: grid; place-items: center; padding: 32px 20px;
+def new_tab_html(search_template:str="https://www.google.com/search?q={searchTerms}",theme=None)->str:
+    """Return a secure local start page with editable, persistent website shortcuts."""
+    palette=theme
+    values={
+        "bg":getattr(palette,"window_bg","#f5f7fa"),"surface":getattr(palette,"toolbar_bg","#ffffff"),
+        "input":getattr(palette,"omnibox_bg","#eef1f5"),"text":getattr(palette,"primary_text","#20252d"),
+        "secondary":getattr(palette,"secondary_text","#586474"),"accent":getattr(palette,"accent_color","#1a73e8"),
+        "border":getattr(palette,"border_color","#c5ccd5"),"hover":getattr(palette,"menu_hover_bg","#e8edf4"),
+        "button_text":contrast_text(QColor(getattr(palette,"accent_color","#1a73e8"))).name(),
     }
-    main { width: min(760px, 100%); text-align: center; transform: translateY(-4vh); }
-    .brand { margin: 0 0 10px; font-size: clamp(34px, 6vw, 54px); font-weight: 650; letter-spacing: -2px; }
-    .brand span { color: #82aaff; }
-    .subtitle { color: #aab5c4; margin: 0 0 38px; font-size: 15px; }
-    .search {
-      display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 20px;
-      background: rgba(24, 28, 34, .94); border: 1px solid #414a57; border-radius: 18px;
-      box-shadow: 0 16px 45px rgba(0, 0, 0, .28); transition: border-color .15s, box-shadow .15s;
-    }
-    .search:focus-within { border-color: #829cff; box-shadow: 0 0 0 3px rgba(103, 130, 255, .17), 0 16px 45px rgba(0,0,0,.28); }
-    .search-icon { color: #aab5c4; font-size: 22px; }
-    input { flex: 1; min-width: 0; color: #f4f6fb; background: transparent; border: 0; outline: 0; font-size: 16px; padding: 13px 0; }
-    input::placeholder { color: #8792a0; }
-    .search button { border: 0; border-radius: 12px; color: #111722; background: #a9c7ff; padding: 12px 19px; font-size: 14px; font-weight: 650; cursor: pointer; }
-    .search button:hover { background: #c4d8ff; }
-    .shortcuts { display: grid; grid-template-columns: repeat(4, minmax(90px, 1fr)); gap: 18px; max-width: 570px; margin: 38px auto 0; }
-    .shortcut { color: #e9edf4; text-decoration: none; display: grid; justify-items: center; gap: 10px; padding: 12px 8px; border-radius: 16px; }
-    .shortcut:hover { background: rgba(255,255,255,.08); }
-    .icon { width: 54px; height: 54px; border-radius: 17px; display: grid; place-items: center; font-size: 21px; font-weight: 700; background: #293443; box-shadow: inset 0 1px rgba(255,255,255,.12); }
-    .google { color: #8ab4f8; } .youtube { color: #ff6666; } .github { color: #f4f6fb; } .wiki { color: #e8edf5; }
-    .label { font-size: 13px; }
-    @media (max-width: 520px) { .shortcuts { grid-template-columns: repeat(2, 1fr); max-width: 330px; } main { transform: none; } }
-  </style>
-</head>
-<body>
-  <main>
-    <h1 class="brand">Light<span>Mq</span></h1>
-    <p class="subtitle">A fresh start for wherever you’re going.</p>
-    <form class="search" onsubmit="return submitSearch(event)">
-      <span class="search-icon" aria-hidden="true">⌕</span>
-      <input name="q" type="search" placeholder="Search the web or enter an address" aria-label="Search the web" autofocus>
-      <button type="submit">Search</button>
-    </form>
-    <nav class="shortcuts" aria-label="Quick links">
-      <a class="shortcut" href="https://www.google.com/"><span class="icon google">G</span><span class="label">Google</span></a>
-      <a class="shortcut" href="https://www.youtube.com/"><span class="icon youtube">▶</span><span class="label">YouTube</span></a>
-      <a class="shortcut" href="https://github.com/"><span class="icon github">⌘</span><span class="label">GitHub</span></a>
-      <a class="shortcut" href="https://www.wikipedia.org/"><span class="icon wiki">W</span><span class="label">Wikipedia</span></a>
-    </nav>
-  </main>
-  <script>
-    function submitSearch(event) {
-      event.preventDefault();
-      const field = event.currentTarget.elements.q;
-      const value = field.value.trim();
-      if (!value) return false;
-      const isAddress = !/\s/.test(value) && (
-        /^(https?:\/\/|localhost(?::\d+)?(?:\/|$)|127\.0\.0\.1(?::\d+)?(?:\/|$))/i.test(value) ||
-        /^[\w-]+(?:\.[\w-]+)+(?:[/:?#].*)?$/i.test(value)
-      );
-      window.location.href = isAddress
-        ? (/^https?:\/\//i.test(value) ? value : `https://${value}`)
-        : `https://www.google.com/search?q=${encodeURIComponent(value)}`;
-      return false;
-    }
-  </script>
-</body>
-</html>"""
+    script_data=json.dumps({"template":search_template,"colors":values}).replace("</","<\\/")
+    return f'''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' qrc:; img-src data:;">
+<title>New Tab - LightMq</title>
+<style>
+:root{{--bg:{values['bg']};--surface:{values['surface']};--input:{values['input']};--text:{values['text']};--secondary:{values['secondary']};--accent:{values['accent']};--border:{values['border']};--hover:{values['hover']};--button-text:{values['button_text']};font-family:"Segoe UI",Arial,sans-serif;color-scheme:light dark}}
+*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;background:radial-gradient(ellipse at 50% 36%,color-mix(in srgb,var(--accent) 12%,var(--bg)),var(--bg) 70%);color:var(--text);display:grid;place-items:center;padding:36px 20px}}
+main{{width:min(760px,100%);text-align:center;transform:translateY(-3vh)}}.brand{{font-size:clamp(38px,6vw,58px);letter-spacing:-2px;margin:0 0 8px;font-weight:650}}.brand span{{color:var(--accent)}}.subtitle{{color:var(--secondary);margin:0 0 32px}}
+form.search{{display:flex;align-items:center;gap:12px;padding:7px 8px 7px 18px;background:var(--surface);border:1px solid var(--border);border-radius:22px;box-shadow:0 12px 34px #0002}}form.search:focus-within{{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 20%,transparent)}}
+input{{flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--text);font-size:16px;padding:13px 3px}}button{{border:0;border-radius:12px;background:var(--accent);color:var(--button-text);font-weight:650;padding:11px 17px;cursor:pointer}}button:hover{{filter:brightness(1.08)}}
+.icon{{width:18px;height:18px;vertical-align:middle;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}}form.search>.icon{{color:var(--secondary);flex:none}}#addShortcut .icon{{margin-right:5px}}.tile-tools button svg{{width:14px;height:14px}}
+.shortcuts{{display:flex;justify-content:center;flex-wrap:wrap;gap:12px;margin:32px auto 18px;max-width:620px}}.tile{{width:126px;position:relative;color:var(--text);text-decoration:none;padding:12px 8px;border-radius:16px;display:flex;flex-direction:column;align-items:center;gap:9px}}.tile:hover{{background:var(--hover)}}.favicon{{width:48px;height:48px;border:1px solid var(--border);border-radius:16px;background:var(--surface);display:grid;place-items:center;font-size:20px;font-weight:700;color:var(--accent)}}.label{{font-size:13px;max-width:108px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.tile-tools{{position:absolute;right:7px;top:7px;display:none;gap:2px}}.tile:hover .tile-tools,.tile:focus-within .tile-tools{{display:flex}}.tile-tools button,.add-tile{{padding:5px 8px;background:var(--surface);color:var(--text);border:1px solid var(--border);font-size:12px}}
+.customize{{background:transparent;color:var(--secondary);border:1px solid var(--border);border-radius:18px;padding:8px 14px}}.customize:hover{{color:var(--text);background:var(--hover)}}.dialog{{display:none;position:fixed;inset:0;background:#0006;place-items:center;padding:16px}}.dialog.open{{display:grid}}.dialog form{{width:min(380px,100%);display:block;background:var(--surface);padding:22px;border:1px solid var(--border);border-radius:18px;text-align:left}}.dialog input{{display:block;width:100%;border:1px solid var(--border);border-radius:10px;margin:10px 0;padding:10px}}.dialog-actions{{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}}
+@media(max-width:540px){{main{{transform:none}}.tile{{width:102px}}body{{padding:20px 14px}}}}
+</style></head><body><main><h1 class="brand">Light<span>Mq</span></h1><p class="subtitle">A fresh start for wherever you’re going.</p>
+<form class="search" onsubmit="return search(event)"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg><input name="q" type="search" placeholder="Search the web or enter an address" aria-label="Search or enter an address" autofocus><button type="submit">Search</button></form>
+<nav class="shortcuts" id="shortcuts" aria-label="Website shortcuts"></nav><button class="customize" id="addShortcut"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Customize LightMq</button></main>
+<div class="dialog" id="dialog" role="dialog" aria-modal="true" aria-label="Edit website shortcut"><form id="shortcutForm"><h2 id="dialogTitle">Add shortcut</h2><label>Shortcut name<input id="shortcutName" maxlength="40" required></label><label>Website URL<input id="shortcutUrl" type="url" placeholder="https://example.com" required></label><div class="dialog-actions"><button type="button" id="cancelEdit" class="customize">Cancel</button><button type="submit">Save</button></div></form></div>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script><script>
+const config={script_data};let bridge=null,template=config.template,shortcuts=[],editing=-1;
+function load(){{if(typeof qt!=="undefined"&&qt.webChannelTransport&&typeof QWebChannel!=="undefined")new QWebChannel(qt.webChannelTransport,channel=>{{bridge=channel.objects.lightmq;bridge.searchTemplate(t=>template=t);bridge.loadShortcuts(raw=>{{try{{shortcuts=JSON.parse(raw)}}catch{{shortcuts=[]}}render()}})}});else{{shortcuts=[{{title:"GitHub",url:"https://github.com/"}},{{title:"Python Docs",url:"https://docs.python.org/3/"}},{{title:"Qt for Python",url:"https://doc.qt.io/qtforpython-6/"}}];render()}}}}
+function render(){{const host=document.getElementById("shortcuts");host.replaceChildren();shortcuts.forEach((item,index)=>{{const tile=document.createElement("div");tile.className="tile";const link=document.createElement("a");link.className="tile";link.href=item.url;link.style.textDecoration="none";link.style.padding="0";link.style.width="100%";const icon=document.createElement("span");icon.className="favicon";icon.textContent=(item.title.trim()[0]||"#").toUpperCase();const label=document.createElement("span");label.className="label";label.textContent=item.title;link.append(icon,label);tile.append(link);const tools=document.createElement("span");tools.className="tile-tools";const edit=document.createElement("button");edit.type="button";edit.textContent="Edit";edit.setAttribute("aria-label","Edit "+item.title);edit.onclick=()=>openEditor(index);const remove=document.createElement("button");remove.type="button";remove.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m18 6-12 12M6 6l12 12"/></svg>';remove.setAttribute("aria-label","Remove "+item.title);remove.onclick=()=>{{if(bridge)bridge.removeShortcut(index,ok=>{{if(ok){{shortcuts.splice(index,1);render()}}}})}};tools.append(edit,remove);tile.append(tools);host.append(tile)}})}}
+function isAddress(value){{return !/\\s/.test(value)&&(/^(https?:\\/\\/|localhost(?::\\d+)?(?:\\/|$)|127\\.0\\.0\\.1(?::\\d+)?(?:\\/|$))/i.test(value)||/^[\\w-]+(?:\\.[\\w-]+)+(?:[/:?#].*)?$/i.test(value))}}
+function search(event){{event.preventDefault();const value=event.currentTarget.elements.q.value.trim();if(!value)return false;if(isAddress(value))location.href=/^https?:\\/\\//i.test(value)?value:"https://"+value;else location.href=template.replace("{{searchTerms}}",encodeURIComponent(value).replace(/%20/g,"+"));return false}}
+function openEditor(index){{editing=index;const dialog=document.getElementById("dialog");document.getElementById("dialogTitle").textContent=index<0?"Add shortcut":"Edit shortcut";document.getElementById("shortcutName").value=index<0?"":shortcuts[index].title;document.getElementById("shortcutUrl").value=index<0?"https://":shortcuts[index].url;dialog.classList.add("open");document.getElementById("shortcutName").focus()}}
+document.getElementById("addShortcut").onclick=()=>openEditor(-1);document.getElementById("cancelEdit").onclick=()=>document.getElementById("dialog").classList.remove("open");
+document.getElementById("shortcutForm").onsubmit=event=>{{event.preventDefault();const title=document.getElementById("shortcutName").value.trim(),url=document.getElementById("shortcutUrl").value.trim();if(!bridge)return;bridge.saveShortcut(title,url,editing,ok=>{{if(ok){{if(editing<0)shortcuts.push({{title,url}});else shortcuts[editing]={{title,url}};render();document.getElementById("dialog").classList.remove("open")}}}})}};
+function setLightMqTheme(colors){{for(const [key,value] of Object.entries(colors))document.documentElement.style.setProperty("--"+key.replaceAll("_","-"),value)}}setLightMqTheme(config.colors);load();
+</script></body></html>'''
 
 
-def private_start_html() -> str:
+def private_start_html(search_template:str="https://www.google.com/search?q={searchTerms}")->str:
     """Return an offline Incognito landing page with accurate privacy limits."""
-    return r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Incognito - LightMq</title>
-<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#202124;color:#e8eaed;font:16px 'Segoe UI',sans-serif;padding:24px;box-sizing:border-box}main{max-width:680px}h1{font-size:32px}p{line-height:1.6;color:#c4c7c5}.badge{color:#bdc1c6;background:#303134;border-radius:20px;padding:8px 14px;display:inline-block}.search{margin:24px 0}input{width:min(480px,65vw);padding:14px;border-radius:10px;border:1px solid #5f6368;background:#303134;color:white;font-size:16px}button{padding:14px 18px;border:0;border-radius:10px;background:#8ab4f8;color:#202124;font-weight:700}</style></head><body><main><span class="badge">◉ Incognito browsing</span><h1>You’re browsing privately</h1><p>LightMq won’t save pages you visit in this Incognito session to regular browsing history, and this session’s cookies and site storage are kept separate from normal browsing.</p><form class="search" onsubmit="event.preventDefault();let q=this.q.value.trim();if(q)location.href=/\s/.test(q)?'https://www.google.com/search?q='+encodeURIComponent(q):(/^https?:\/\//i.test(q)?q:'https://'+q)"><input name="q" placeholder="Search or enter an address" aria-label="Search or enter an address"><button>Go</button></form><p><strong>Downloads and bookmarks you choose to save remain on this device.</strong></p><p>Private browsing does not hide activity from websites, your internet provider, or an employer or network administrator. It does not provide VPN or Tor anonymity.</p></main></body></html>"""
+    config=json.dumps(search_template).replace("</","<\\/")
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';"><title>Incognito - LightMq</title>
+<style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#202124;color:#e8eaed;font:16px 'Segoe UI',sans-serif;padding:24px;box-sizing:border-box}}main{{max-width:680px}}h1{{font-size:32px}}p{{line-height:1.6;color:#c4c7c5}}.badge{{color:#bdc1c6;background:#303134;border-radius:20px;padding:8px 14px;display:inline-flex;align-items:center;gap:8px}}.icon{{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}}.search{{margin:24px 0}}input{{width:min(480px,65vw);padding:14px;border-radius:10px;border:1px solid #5f6368;background:#303134;color:white;font-size:16px}}button{{padding:14px 18px;border:0;border-radius:10px;background:#8ab4f8;color:#202124;font-weight:700}}</style></head><body><main><span class="badge"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h18l-2-3H5zM2 12h8m4 0h8"/><circle cx="7" cy="15" r="3"/><circle cx="17" cy="15" r="3"/><path d="M10 15h4"/></svg>Incognito browsing</span><h1>You’re browsing privately</h1><p>LightMq won’t save pages you visit in this Incognito session to regular browsing history, and this session’s cookies and site storage are kept separate from normal browsing.</p><form class="search" onsubmit="event.preventDefault();let q=this.q.value.trim();if(q)location.href=/\\s/.test(q)?{config}.replace("{{searchTerms}}",encodeURIComponent(q).replace(/%20/g,"+")):(/^https?:\\/\\//i.test(q)?q:'https://'+q)"><input name="q" placeholder="Search or enter an address" aria-label="Search or enter an address"><button>Go</button></form><p><strong>Downloads and bookmarks you choose to save remain on this device.</strong></p><p>Private browsing does not hide activity from websites, your internet provider, or an employer or network administrator. It does not provide VPN or Tor anonymity.</p></main></body></html>'''

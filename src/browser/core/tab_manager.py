@@ -404,10 +404,11 @@ class TabManager(QObject):
                 removed += 1
         return removed
 
-    def restore_closed_tab(self) -> WebView | None:
-        """Restore the newest supported closed tab, including an extant group."""
+    def restore_closed_tab(self, selected: ClosedTab | None = None) -> WebView | None:
+        """Restore a selected recent tab or the newest one, if it remains valid."""
         while True:
-            closed = self.tab_history.pop()
+            closed = self.tab_history.take(selected) if selected is not None else self.tab_history.pop()
+            selected=None
             if closed is None:
                 return None
             safe_url = SessionSnapshot.sanitize_url(closed.url.toString())

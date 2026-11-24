@@ -184,11 +184,11 @@ def test_bookmark_star_manager_and_shortcut_are_connected():
     win=MainWindow()
     url="https://bookmark-ui.example/path"
     win._update_bookmark_button(url)
-    assert win.btn_bookmark.text()=="☆"
+    assert win.btn_bookmark.property("lightmqIconName")=="bookmark"
     manager=BookmarkManager.get_instance()
     manager.create_bookmark("Bookmark UI",url)
     win._update_bookmark_button(url)
-    assert win.btn_bookmark.text()=="★"
+    assert win.btn_bookmark.property("lightmqIconName")=="bookmark-filled"
     menu_action=win.saved_bookmarks_menu.actions()[0]
     bookmark_action=menu_action.menu().actions()[0]
     assert bookmark_action.text()=="Bookmark UI"

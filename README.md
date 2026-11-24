@@ -16,7 +16,7 @@ LightMq uses **Qt WebEngine**, which embeds the **Chromium** browser engine and 
 
 ---
 
-## Current Status: Multi-Tab Browser with Developer Tools, Bookmarks, and Incognito (Phase 11)
+## Current Status: Multi-Tab Browser with Developer Tools, Bookmarks, Incognito, and Customizable Frontend (Phase 12)
 
 LightMq includes a multi-tab browser, persistent regular profile, session restoration, native settings, downloads and history, grouped tabs, Chromium Developer Tools, a persistent bookmark manager, and isolated Incognito sessions. These features are implemented in the existing PySide6/Qt WebEngine architecture and covered by the automated suite.
 
@@ -150,7 +150,7 @@ Alternatively, click the **About** button in the browser toolbar to view the liv
 
 - **New Tab Page**:
   - New tabs and new windows open a built-in LightMq start page instead of navigating to `example.com`. Home uses the configured homepage (Google by default).
-  - The page is self-contained and includes a search/address field plus quick links for Google, YouTube, GitHub, and Wikipedia. Typed addresses navigate directly; other text is searched with Google.
+- The page is self-contained and includes a search/address field plus editable, removable website shortcuts persisted in LightMq settings. Typed addresses navigate directly; other text uses the configured search provider.
 
 - **Session Restoration & Startup**:
   - Regular browser tabs are saved in a versioned JSON snapshot below the operating-system application-data directory in `Sessions/current_session.json`; an atomic recovery copy is kept alongside it. URLs, titles, tab order, and active tab are stored. Cookies remain in the separate Qt WebEngine profile.
@@ -329,11 +329,23 @@ When Session Restoration is enabled, schema v2 snapshots store pinned state, gro
 
 ## Browser Settings and Customization
 
-The **Settings** toolbar button opens a native category-based window backed by the existing `QSettings` store. Appearance supports Light, Dark, and System modes plus accent color and toolbar density; theme changes apply to browser widgets and never inject CSS into pages. Search supports Google, Bing, DuckDuckGo, Brave Search, and validated HTTP(S) custom templates. Plain search text is encoded and routed through the selected provider while recognized URLs and localhost addresses retain direct navigation.
+The **Settings** toolbar button opens a native category-based window backed by the existing `QSettings` store. Appearance supports Light, Dark, System, and Custom modes. Custom mode includes a draggable hue ring, saturation/value surface, HEX and RGB inputs, recent-color swatches, light/dark surfaces, and an in-dialog preview. Applying themes updates browser widgets immediately, without replacing tabs or injecting CSS into websites. Palette tokens derive coordinated tab, toolbar, omnibox, menu, dialog, border, text, and focus colors from the chosen accent. The main browser shell includes a compact tab strip, rounded responsive address bar, themed three-dot menu, profile control, download indicator, and tab search/recently closed list.
+
+Search supports Google, Bing, DuckDuckGo, Brave Search, and validated HTTP(S) custom templates. Plain search text is encoded and routed through the selected provider while recognized URLs and localhost addresses retain direct navigation.
 
 Settings also expose the homepage, new-tab destination, the existing session-restoration toggle and fallback, default page zoom, download directory/save prompting, shortcuts, and a link to existing privacy controls. New and restored views use the saved default zoom; later zoom changes remain per tab. Reset Settings confirms before restoring preference defaults and leaves browsing history, downloads, cookies, login sessions, and session files intact. System theme follows Qt's platform color-scheme notification where supported.
 
-Limitations: appearance uses the OS-reported Qt color scheme and may not update on platforms that do not emit a color-scheme change. Download save behavior is shared across windows through the existing handler and preferences. Resetting preferences requires no restart for theme and shortcut updates; settings affecting startup take effect on the next launch.
+Limitations: System appearance follows Qt's OS color-scheme notification where supported. Resetting preferences requires no restart for theme and shortcut updates; settings affecting startup take effect on the next launch. The browser keeps the native Windows title bar to preserve standard resize, snapping, and window controls.
+
+### Frontend and Theme Customization (Phase 12)
+
+The native UI uses coordinated theme tokens across the tab strip, toolbar, rounded omnibox, menu, dialogs, and buttons. Custom color preview is temporary until **Apply theme**; **Cancel preview** restores the stored theme, and **Reset theme** restores System mode and the default accent. Up to eight recent custom colors are available as swatches. Foreground colors are selected by luminance for readable contrast. Existing tab-group colors remain owned by each group, and the regular page renderer is not restyled by browser appearance changes.
+
+The LightMq start page now supports adding, editing, and removing shortcuts. Its narrow QWebChannel bridge validates public URL shortcuts and only writes changes from the trusted internal start page; Incognito can read configured shortcuts but does not persist edits.
+
+### Browser Icon System (Phase 13)
+
+Browser chrome uses an original LightMq SVG outline set rendered through QtSvg. One `IconManager` supplies toolbar, tab, menu, address-bar, find, bookmark, and Settings icons, with reusable accessible `IconButton` controls. Icons use 20 px toolbar artwork, consistent rounded strokes, cached SVG renderers and device-pixel-ratio-aware pixmaps. Normal, hover/active, and disabled colors come from the current theme palette with contrast checks. Website favicons remain untouched; Incognito controls use a dark icon palette that matches the private window.
 
 ## Developer Tools
 
