@@ -14,6 +14,9 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QIcon
+from browser.utils.paths import resource_path
 from browser.core.session_manager import SessionManager
 from browser.storage.settings import StartupMode, StartupSettings
 from browser.ui.main_window import MainWindow
@@ -63,6 +66,8 @@ def main() -> int:
 
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("LightMq")
+    app.setApplicationVersion(APP_VERSION)
+    app.setWindowIcon(QIcon(str(resource_path("resources/lightmq.ico"))))
 
     # Handle --version flag
     if args.version:
@@ -74,6 +79,26 @@ def main() -> int:
     if args.diagnostics:
         print(format_diagnostics_report())
         return 0
+
+    from browser.utils.startup_diagnostics import configure_startup_logging
+    configure_startup_logging()
+
+    local_document = None
+    if args.url is not None:
+        candidate = Path(args.url).expanduser()
+        if candidate.is_file():
+            candidate = candidate.resolve()
+            if candidate.suffix.lower() == ".xlsx":
+                local_document = candidate
+                args.url = "lightmq://newtab"
+            elif candidate.suffix.lower() in {".pdf", ".html", ".htm"}:
+                args.url = QUrl.fromLocalFile(str(candidate)).toString()
+            else:
+                QMessageBox.warning(None, "Unsupported file", "Supported local files: PDF, XLSX, HTML, HTM.")
+                return 2
+        elif candidate.is_absolute() or args.url.lower().startswith("file:"):
+            QMessageBox.warning(None, "File unavailable", "The requested local file does not exist or cannot be opened.")
+            return 2
 
     session_manager = SessionManager(parent=app)
     crashed, recovery_snapshot = session_manager.begin_run()
@@ -111,6 +136,8 @@ def main() -> int:
         restore_snapshot=restore_snapshot,
     )
     window.show()
+    if local_document is not None:
+        window.open_local_document(str(local_document))
 
     return app.exec()
 

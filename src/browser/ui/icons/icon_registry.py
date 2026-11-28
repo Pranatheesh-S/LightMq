@@ -5,6 +5,7 @@ style. They are intentionally simple so they remain legible at toolbar sizes.
 """
 
 ICON_MARKUP: dict[str, str] = {
+    "select-element": '<path d="M5 3v16l4-4 3 6 3-1.5-3-6H18z"/><circle cx="18" cy="6" r="3"/>',
     "arrow-left": '<path d="M19 12H5M12 19l-7-7 7-7"/>',
     "arrow-right": '<path d="M5 12h14m-7-7 7 7-7 7"/>',
     "reload": '<path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9A7 7 0 0 1 18 6l2 6M4 12l2 6a7 7 0 0 0 12.4-3"/>',
@@ -45,6 +46,7 @@ ICON_MARKUP: dict[str, str] = {
     "edit": '<path d="m15 5 4 4M4 20l4-.8L19 8a2.8 2.8 0 0 0-4-4L4 15z"/>',
     "arrow-up": '<path d="M12 19V5m-7 7 7-7 7 7"/>',
     "arrow-down": '<path d="M12 5v14m7-7-7 7-7-7"/>',
+    "extensions": '<path d="M8 3a2 2 0 1 1 4 0v2h3a2 2 0 0 1 2 2v3h2a2 2 0 1 1 0 4h-2v3a2 2 0 0 1-2 2h-3v-2a2 2 0 1 0-4 0v2H5a2 2 0 0 1-2-2v-3h2a2 2 0 1 0 0-4H3V7a2 2 0 0 1 2-2h3z"/>',
 }
 
 

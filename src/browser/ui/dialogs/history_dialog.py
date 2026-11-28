@@ -5,7 +5,7 @@ from datetime import datetime, time, timedelta, timezone
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel, QInputDialog,
+    QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel, QInputDialog,
     QDateEdit, QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -20,11 +20,13 @@ class HistoryDialog(QDialog):
     open_in_new_tab_requested = Signal(str)
     PAGE_SIZE = 100
 
-    def __init__(self, history_manager: HistoryManager | None = None, parent: QWidget | None = None):
+    def __init__(self, history_manager: HistoryManager | None = None, parent: QWidget | None = None,
+                 recommendation_controller=None):
         super().__init__(parent)
         self.setWindowTitle("Browsing History")
         self.resize(900, 560)
         self._manager = history_manager or HistoryManager.get_instance()
+        self._recommendation_controller = recommendation_controller
         self._page = 0
         self._init_ui()
         self._manager.history_changed.connect(self._load_entries)
@@ -196,13 +198,24 @@ class HistoryDialog(QDialog):
             QApplication.clipboard().setText(selected[1])
 
     def _clear_all(self) -> None:
-        answer = QMessageBox.question(
-            self, "Clear browsing history", "Delete all saved browsing history?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer == QMessageBox.StandardButton.Yes:
+        self._confirm_and_clear_history("Clear browsing history", "Delete all saved browsing history?")
+
+    def _confirm_and_clear_history(self, title: str, message: str) -> None:
+        """Clear all history and honor the user's explicit pin-preservation choice."""
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle(title)
+        dialog.setText(message)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        keep_pins = QCheckBox("Keep pinned recommendation shortcuts", dialog)
+        keep_pins.setChecked(False)
+        if self._recommendation_controller is not None:
+            dialog.setCheckBox(keep_pins)
+        if dialog.exec() == QMessageBox.StandardButton.Yes:
             self._manager.clear()
+            if self._recommendation_controller is not None:
+                self._recommendation_controller.clear_data(keep_pins=keep_pins.isChecked())
 
     def _clear_range(self) -> None:
         """Clear one standard time range with a confirmation prompt."""
@@ -210,20 +223,19 @@ class HistoryDialog(QDialog):
         selected, accepted = QInputDialog.getItem(self, "Clear browsing history", "Time range:", list(choices), 0, False)
         if not accepted:
             return
-        answer = QMessageBox.question(
-            self, "Confirm deletion", f"Delete browsing history for {selected.lower()}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
         now = datetime.now().astimezone()
         durations = {"Last hour": timedelta(hours=1), "Last 24 hours": timedelta(hours=24),
                      "Last 7 days": timedelta(days=7), "Last 30 days": timedelta(days=30)}
         if selected == "All time":
-            self._manager.clear()
+            self._confirm_and_clear_history("Confirm deletion", "Delete all browsing history?")
         else:
-            self._manager.clear(start=(now - durations[selected]).astimezone(timezone.utc))
+            answer = QMessageBox.question(
+                self, "Confirm deletion", f"Delete browsing history for {selected.lower()}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._manager.clear(start=(now - durations[selected]).astimezone(timezone.utc))
 
     def _previous_page(self) -> None:
         self._page = max(0, self._page - 1)

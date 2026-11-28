@@ -298,6 +298,18 @@ class BookmarkManager(QObject):
                 rows=db.execute("SELECT id,title,url,parent_id,position,created_at,updated_at,item_type FROM bookmark_items WHERE item_type='bookmark' ORDER BY parent_id,position,id LIMIT ?",(max(1,min(limit,10000)),)).fetchall()
         return [BookmarkItem(**dict(row)) for row in rows]
 
+    def recommendation_candidates(self, limit: int = 1000) -> list[dict[str, str]]:
+        """Read bounded bookmark metadata, including its immediate folder label."""
+        bounded = max(1, min(int(limit), 2000))
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT b.url,b.title,b.favicon,b.created_at,COALESCE(p.title,'') AS folder "
+                "FROM bookmark_items b LEFT JOIN bookmark_items p ON p.id=b.parent_id "
+                "WHERE b.item_type='bookmark' ORDER BY b.updated_at DESC,b.position,b.id LIMIT ?",
+                (bounded,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def export_tree(self, parent_id: int | None = None) -> list[dict[str, object]]:
         parent_id = self.BAR_ROOT_ID if parent_id is None else parent_id
         return [self._to_tree(item) for item in self.children(parent_id)]

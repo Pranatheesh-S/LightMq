@@ -16,9 +16,9 @@ LightMq uses **Qt WebEngine**, which embeds the **Chromium** browser engine and 
 
 ---
 
-## Current Status: Multi-Tab Browser with Developer Tools, Bookmarks, Incognito, and Customizable Frontend (Phase 12)
+## Current Status: Multi-Tab Browser with Phase 16 Local Recommendations
 
-LightMq includes a multi-tab browser, persistent regular profile, session restoration, native settings, downloads and history, grouped tabs, Chromium Developer Tools, a persistent bookmark manager, and isolated Incognito sessions. These features are implemented in the existing PySide6/Qt WebEngine architecture and covered by the automated suite.
+LightMq includes a multi-tab browser, persistent regular profile, session restoration, native settings, downloads and history, grouped tabs, Chromium Developer Tools, bookmarks, isolated Incognito sessions, a built-in PDF reader, a native `.xlsx` viewer, and a temporary HTML/CSS/JavaScript element inspector. These features use the existing PySide6/Qt WebEngine architecture.
 
 ---
 
@@ -150,7 +150,17 @@ Alternatively, click the **About** button in the browser toolbar to view the liv
 
 - **New Tab Page**:
   - New tabs and new windows open a built-in LightMq start page instead of navigating to `example.com`. Home uses the configured homepage (Google by default).
-- The page is self-contained and includes a search/address field plus editable, removable website shortcuts persisted in LightMq settings. Typed addresses navigate directly; other text uses the configured search provider.
+  - The page is self-contained and includes a search/address field plus editable, removable website shortcuts persisted in LightMq settings. Typed addresses navigate directly; other text uses the configured search provider.
+  - The trusted start page loads Qt's bundled WebChannel client under its restrictive Content Security Policy. LightMq registers Qt's documented QRC access flags at startup so the shortcut and local-recommendation bridge functions with Qt 6 custom origins.
+
+- **Local Recommendations (Phase 16)**:
+  - Personalized recommendations are **off by default**. Enable them in **Settings → Recommendations**; history and bookmark sources, New Tab display, Continue Browsing, and related-page display can be controlled separately.
+  - On opt-in, recommendations use a bounded pool from LightMq's existing SQLite history and bookmark tables. A deterministic score combines capped logarithmic frequency (30%), 14-day exponential recency (30%), bookmark presence (20%), title/hostname/folder word overlap (15%), and explicit pin feedback (5%). Cards show only reasons supported by those signals.
+  - The New Tab page provides Recommended, Related, and Continue Browsing sections with open, open-in-new-tab, pin/unpin, hide, right-click actions, and refresh. Empty history remains empty; no sample sites are invented.
+  - Hiding and pinning store only a normalized URL path (query and fragment removed), the host, and an optional title in a small `recommendation_feedback` table alongside existing browser metadata. No duplicate history is created. Feedback can be managed or cleared from Settings without removing browsing history, bookmarks, cookies, login sessions, downloads, or session files.
+  - Clearing all LightMq history also clears recommendation feedback by default. The clear-data and history dialogs let the user explicitly keep pinned shortcuts; partial time-range deletion only invalidates rankings.
+  - Incognito pages never request, render, or write recommendation data. Local files, private/internal addresses, localhost/private IPs, authentication/payment/reset routes, credential URLs, and obvious token-bearing URLs are excluded. Favicons render only when already stored as a small `data:image` value; LightMq does not fetch remote icons.
+  - All filtering and ranking run locally. The page Content Security Policy blocks network resources; no cloud AI, telemetry, or recommendation service is used. Context matching is keyword overlap, not semantic understanding. Sparse local data produces fewer or no suggestions.
 
 - **Session Restoration & Startup**:
   - Regular browser tabs are saved in a versioned JSON snapshot below the operating-system application-data directory in `Sessions/current_session.json`; an atomic recovery copy is kept alongside it. URLs, titles, tab order, and active tab are stored. Cookies remain in the separate Qt WebEngine profile.
@@ -218,13 +228,13 @@ Shortcuts are registered once per browser window by `ShortcutManager` with windo
 | `Ctrl++` (also `Ctrl+=`) / `Ctrl+-` / `Ctrl+0` | Zoom in / out / reset (25%–500%) |
 | `F12` / `Ctrl+Shift+I` | Toggle Chromium Developer Tools |
 | `Ctrl+Shift+J` | Open Developer Tools and focus its view |
-| `Ctrl+Shift+C` | Invoke Chromium's Inspect Element page action and open Developer Tools |
+| `Ctrl+Shift+C` | Toggle LightMq's webpage element picker |
 | `Ctrl+U` | Open the current URL using Chromium's `view-source:` scheme in a new tab |
 
 ### Shortcut support and limitations
 
 - Find-in-page uses `QWebEngineView.findText()`. Cache bypass uses Qt WebEngine's `ReloadAndBypassCache` page action.
-- Developer Tools are Chromium's bundled inspector attached through `QWebEnginePage.setDevToolsPage()`. Qt WebEngine does not expose commands to select a specific DevTools panel; therefore Ctrl+Shift+J opens and focuses the DevTools view but cannot guarantee switching to the Console panel. Inspect Element relies on Qt's exposed `InspectElement` action.
+- Chromium Developer Tools remain attached through `QWebEnginePage.setDevToolsPage()`. Ctrl+Shift+C starts/stops LightMq's separate element picker; page context-menu Inspect still opens Chromium DevTools. Qt WebEngine does not expose commands to select a specific Chromium panel, so Ctrl+Shift+J cannot guarantee switching to its Console.
 - Ctrl+U uses Chromium's built-in `view-source:` URL handling. Printing and saving use Qt WebEngine page APIs.
 - Recently closed tabs keep URL and title only; in-memory page state and private tabs are not restored. Private windows use an ephemeral profile and do not write closed-tab restore history.
 
@@ -347,11 +357,43 @@ The LightMq start page now supports adding, editing, and removing shortcuts. Its
 
 Browser chrome uses an original LightMq SVG outline set rendered through QtSvg. One `IconManager` supplies toolbar, tab, menu, address-bar, find, bookmark, and Settings icons, with reusable accessible `IconButton` controls. Icons use 20 px toolbar artwork, consistent rounded strokes, cached SVG renderers and device-pixel-ratio-aware pixmaps. Normal, hover/active, and disabled colors come from the current theme palette with contrast checks. Website favicons remain untouched; Incognito controls use a dark icon palette that matches the private window.
 
+### Built-in PDF Reader (Phase 13)
+
+LightMq uses Qt WebEngine's built-in Chromium PDF viewer in the existing tab and profile. Inline viewing sets both `PdfViewerEnabled` and `PluginsEnabled`, as required by [Qt WebEngine's PDF viewing support](https://doc.qt.io/qt-6/qtwebengine-features.html). HTTP(S) responses are identified by their response MIME type, so PDF URLs do not need a `.pdf` suffix. Server attachment responses continue through the existing Download Manager.
+
+**Browser Menu → Open File…** and **Ctrl+O** open readable local PDFs in a new tab, including paths with spaces and Unicode characters. LightMq checks the PDF header before opening. Normal PDFs use the shared persistent profile; Incognito PDFs use the existing off-the-record profile. Existing valid local PDF paths can be restored from normal session snapshots; moved or missing files are skipped safely.
+
+### Native Excel Viewer (Phase 13.1)
+
+**Browser Menu → Open File…** and **Ctrl+O** also open `.xlsx` workbooks in native document tabs. The viewer uses a Qt table model and supports multiple worksheets, selection, copy, cell search, and a read-only View Mode by default. Edit Mode allows controlled changes to individual values with per-workbook undo/redo; formulas and merged non-anchor cells remain read-only. Text beginning with `=` is stored as literal text. Numeric, boolean, date, date-time, text, and empty values are displayed and converted where practical.
+
+Save As is recommended and asks before replacing existing targets. Saving uses a same-directory temporary file and atomic replacement. Original-file Save asks for an explicit confirmation; workbooks with formula cells warn that `openpyxl` may invalidate cached formula results, and LightMq never calculates formulas. Workbooks with known drawings, external links, embedded objects, or macro-related package entries open in view-only mode because safe round-trip preservation is not guaranteed. `.xls`, `.xlsm`, `.xlsb`, `.ods`, spreadsheet printing, formula evaluation, and advanced Excel features are unsupported. Session restoration stores only the validated local `.xlsx` path and tab metadata, never workbook contents.
+
+The native viewer provides its own page navigation, zoom/fit, text search, download, and print controls. **Ctrl+F** is left to the native PDF viewer while a PDF tab is active. **Ctrl+S** requests the current PDF download through the page's own WebEngine profile, preserving the existing authentication context and Download Manager destination/overwrite handling. The **Settings → Downloads & PDF** preference chooses inline viewing or downloading instead and persists in the existing `QSettings` store.
+
+**Limitations:** Qt does not expose a supported per-PDF default zoom or “remember PDF reader preferences” API, so LightMq does not add controls that only appear to set these values. Detailed metadata and password-dialog behavior remain owned by Qt's Chromium viewer and were not independently automated. Physical printing depends on the configured OS printer and was not verified in headless tests. OCR, annotations, and PDF editing are out of scope.
+
+### Native Extension Manager (Experimental)
+
+The **Browser Menu → Extensions** entry and puzzle toolbar menu use one controller attached to LightMq's shared regular `QWebEngineProfile`. The native manager validates Manifest V3 manifests and ZIP paths/sizes before handing packages to Qt; it supports profile-persistent installation from ZIP or folder, temporary Developer Mode loading, permission review, extension details, Qt-reported action-popup metadata, and uninstall. The Extensions window can search installed extensions and safely display bounded raster icons from package manifests. SVG icons are ignored. LightMq reloads persisted packages through the same profile manager when this Qt runtime does not enumerate them at startup. Extensions remain unavailable in Incognito. The manager never extracts ZIPs itself or changes regular cookies/storage outside Qt's extension store.
+
+**Phase 17 analysis and diagnostics:** LightMq extracts Manifest V3 background worker, action popup, icon, web-accessible resource, CSP, permission, and other manifest declarations. It statically scans at most 2 MiB/256 JavaScript files for `chrome.*`/`browser.*` namespace references without executing the package. Compatibility reports are tied to the runtime version and label APIs unknown unless LightMq has direct runtime evidence. Permission review separates API permissions, host access, optional permissions, and content-script matches; it flags sensitive and wildcard access but does not claim fine-grained permission enforcement. Diagnostics show Qt's actual loaded/installed/enabled/error state and clearly mark content-script, popup, and worker checks as not run when the extension is disabled.
+
+On a recognized Chrome Web Store listing, **View Compatibility in LightMq** offers inspection of a user-selected local ZIP or unpacked folder. A listing ID is read from the HTTPS URL but is not independently verified. LightMq does not fetch store packages: Google's [documented Chrome Web Store API](https://developer.chrome.com/docs/webstore/api) is an authenticated publisher management API, not a consumer package download interface. No User-Agent spoofing, private endpoint scraping, or CRX mirrors are used.
+
+The **Compare Local Update…** action compares a user-selected package's declared key/version and added required/optional permissions. A matching manifest key is only a claim; LightMq does not cryptographically verify the selected ZIP. Qt provides no verified atomic in-place update/rollback flow here, so this action never changes the managed install.
+
+**Runtime limitation:** This project environment uses Python 3.12.9, PySide6 6.12.0, Qt 6.12.0, and Chromium 140.0.0.0. A prior controlled local MV3 test showed that calling `QWebEngineExtensionManager.setExtensionEnabled()` terminates the process with a native access violation. LightMq blocks that call. Packages install/load disabled, so content script execution, background behavior, and popup rendering cannot currently be verified; enable/disable preferences are not restored. The puzzle menu only opens popups that Qt reports for an enabled extension. The current compatibility result is therefore **Limited Compatibility**, not “Verified Working.” Re-test the native setter after updating the Qt runtime before exposing enablement.
+
+**Chrome Web Store status:** Listing recognition and local-package analysis are implemented. Direct store downloads/installation, automatic updates, and rollback-safe replacement are **unsupported**. A local comparison is not a trusted update channel. Qt documents filesystem-based Manifest V3 loading and profile-scoped managers, but this does not imply full Chrome API compatibility.
+
 ## Developer Tools
 
-**F12** opens the existing resizable Chromium DevTools, including its Elements, Console, Sources, and Network tools. The DevTools panel also offers **LightMq Tools**: a lazy DOM tree with bounded child batches and CSS selector lookup; an element picker with hover outline and Esc cancellation; computed CSS inspection and temporary inline-property edits with reset; a bounded in-memory JavaScript console with severity/search filters and explicit command execution; request-side metadata monitoring; and on-demand page performance timings.
+**F12** opens the existing resizable Chromium DevTools, including its Elements, Console, Sources, and Network tools. In **LightMq Tools**, **Ctrl+Shift+C** or **Select Element** enables a throttled hover overlay; click a target to inspect it, press Esc to cancel, and toggle the picker again to stop it. Tree selections also highlight the page element. The panel can be resized on the right or bottom; its dock side and splitter proportions are remembered in `QSettings`.
 
-The custom tools follow the active tab and reuse its page. They do not expose a Python bridge or write diagnostic logs to disk. Qt's request interceptor only reports request metadata; response status codes, response bodies, and network timing are not available from this data source and are shown as unavailable. Performance metrics vary by page/Chromium support; JS heap usage may be unsupported. DOM access is limited to the current document and same-origin access available to page JavaScript; cross-origin iframe contents and stylesheet source rules are not inspected. Chromium DevTools remains the source for full protocol-backed network and source inspection.
+The DOM tools display bounded, actual HTML, attributes, text, box dimensions, parent/child information, CSS selectors, XPath, and inline event attributes. Sensitive form values, token-like attributes, and sensitive URL query parameters are filtered from returned markup and CSS. DOM expansion is lazy and supports open shadow roots; cross-origin iframe internals and closed shadow roots remain inaccessible. The CSS tool shows browser-computed properties, accessible matching rules, and a box-model diagram labeled with measured CSS pixel values. CSS overrides and permitted leaf-text/attribute edits are temporary; Undo, Redo, and Reset restore CSS changes, and closing the tools panel restores current temporary edits. Inspector edits are bounded to 100 HTML-edited elements and 200 distinct CSS element/property pairs at a time. Edits never write to site files.
+
+The JavaScript tab only reports observable inline handler attributes. Standard DOM inspection cannot enumerate all `addEventListener()` listeners or reliably map a node to bundled JavaScript sources; it states this limitation and provides **Open Chromium DevTools**. Selection and inspector code use Qt WebEngine's isolated Application World, structured JSON results, bounded payloads, and no remote debugging endpoint. PDF and native document tabs show an unsupported-inspection message. The custom tools follow the active tab and clear stale selection on navigation, renderer termination, tab changes, panel close, and window close. Qt's request interceptor still reports request-side metadata only; Chromium DevTools remains authoritative for protocol-backed debugging.
 
 ## Testing
 
@@ -381,6 +423,8 @@ The automated suite covers:
 - URL normalization and address bar signal emission.
 - Repeated DevTools open/close stability and live page loading.
 
+Phase 17 complete run: **184 passed** (`pytest -q`), including isolated extension package, compatibility, listing recognition, permission, update-comparison, dialog, and profile integration checks. `python -m compileall -q src tests` and `git diff --check` passed. The current runtime limitation on extension enabling is documented above; the suite intentionally does not invoke the crashing native setter.
+
 ---
 
 ## Known Limitations
@@ -398,3 +442,27 @@ The automated suite covers:
 ## License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+
+## Windows release candidate (Phase 18)
+
+Windows x64 packaging is available through `packaging/windows/build.ps1` and
+`build_installer.ps1`. PyInstaller builds a standalone directory with Python,
+Qt WebEngine/PDF, openpyxl, themes, an original application icon, and license
+notices. Inno Setup provides per-user installation, Start Menu and optional
+desktop shortcuts, and uninstall without removing browsing data. The existing
+Qt profile/settings identity is retained; no data migration is performed.
+
+This is an **unsigned internal test candidate**. Current Qt wheels carry
+commercial-license notices; redistribution entitlement has not been verified.
+Clean Windows testing, an earlier-version upgrade test, display/GPU/media
+checks, signing and complete license review remain release gates. Extension
+enabling remains blocked by the existing Qt native crash. Download records
+remain session-only. The ZIP uses normal per-user data paths, not isolated
+portable profiles. No default file/browser associations are registered.
+
+See [Windows packaging guide](packaging/windows/README.md) for build, install,
+uninstall, data paths, diagnostics, signing, verification and release limitations.
+The Phase 18 full regression run passed **187 tests**. The standalone probe
+verified HTTPS/reload, tabs, themes/icons, DevTools, XLSX, Incognito isolation,
+and synthetic settings persistence on the development host. This does not
+replace testing on Windows without Python, Qt or a source checkout.

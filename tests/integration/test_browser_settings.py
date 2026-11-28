@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from browser.features.history.history_manager import HistoryManager
 from browser.storage.settings import BrowserSettings, StartupSettings
 from browser.ui.main_window import MainWindow
 from browser.ui.settings_window import SettingsWindow
@@ -143,6 +144,82 @@ def test_new_tab_channel_loads_shortcuts_and_theme_updates_without_reload(tmp_pa
     assert len(finished)==load_count
 
 
+def test_opted_in_recommendations_render_real_local_history_on_new_tab(tmp_path):
+    store=QSettings("LightMq","LightMq Browser")
+    previous=store.value("recommendations/enabled",None)
+    try:
+        store.setValue("recommendations/enabled",True);store.sync()
+        HistoryManager.get_instance().add_entry(
+            "https://recommendation-fixture.example.com/guide",
+            "Synthetic LightMq recommendation",visit_type="typed",
+        )
+        window=MainWindow();window.resize(1100,720)
+        view=window.web_view
+        assert window._recommendation_controller.enabled
+        loop=QEventLoop();timeout=QTimer();timeout.setSingleShot(True);timeout.timeout.connect(loop.quit)
+        completed=[];view.loadFinished.connect(lambda ok:completed.append(ok))
+        ready=[]
+        view._new_tab_bridge.recommendations.recommendations_ready.connect(
+            lambda *_:(ready.append(True),loop.quit())
+        )
+        window.show();app.processEvents()
+        if not completed:
+            timeout.start(8000);loop.exec();timeout.stop()
+        assert completed and completed[-1]
+        assert view._new_tab_bridge.recommendationsEnabled()
+        if not ready:
+            timeout.start(5000);loop.exec();timeout.stop()
+        app.processEvents()
+        rendered=[]
+        view.page().runJavaScript(
+            "document.getElementById('recommendations').hidden+'|'+document.getElementById('recommendedCards').innerText",
+            lambda value:(rendered.append(value),loop.quit()),
+        )
+        timeout.start(3000);loop.exec();timeout.stop()
+        assert rendered and rendered[0].startswith("false|")
+        assert "Synthetic LightMq recommendation" in rendered[0]
+    finally:
+        if previous is None:store.remove("recommendations/enabled")
+        else:store.setValue("recommendations/enabled",previous)
+        store.sync()
+
+
+def test_recommendation_settings_are_opt_in_visible_and_persisted():
+    store=QSettings("LightMq","LightMq Browser")
+    keys=("recommendations/enabled","recommendations/source_history","recommendations/source_bookmarks",
+          "recommendations/show_new_tab","recommendations/show_continue","recommendations/show_related")
+    previous={key:store.value(key,None) for key in keys}
+    try:
+        for key in keys:store.remove(key)
+        window=MainWindow(initial_url="about:blank")
+        dialog=SettingsWindow(window._browser_settings,window._startup_settings,window,
+                              recommendation_controller=window._recommendation_controller)
+        index=dialog.CATEGORIES.index("Recommendations")
+        assert not dialog.sidebar.item(index).icon().isNull()
+        dialog.sidebar.setCurrentRow(index)
+        assert not dialog.recommendations_enabled.isChecked()
+        dialog.recommendations_enabled.setChecked(True)
+        dialog.recommendations_history.setChecked(False)
+        dialog.recommendations_show_new_tab.setChecked(False)
+        restored=BrowserSettings(QSettings("LightMq","LightMq Browser"))
+        assert SettingsWindow._preference_bool(restored,"recommendations/enabled",False) is True
+        assert SettingsWindow._preference_bool(restored,"recommendations/source_history",True) is False
+        assert SettingsWindow._preference_bool(restored,"recommendations/show_new_tab",True) is False
+        restored_dialog=SettingsWindow(restored,window._startup_settings,window,
+                                       recommendation_controller=window._recommendation_controller)
+        assert restored_dialog.recommendations_enabled.isChecked()
+        assert not restored_dialog.recommendations_history.isChecked()
+        assert not restored_dialog.recommendations_show_new_tab.isChecked()
+        assert not window._recommendation_controller.show_on_new_tab
+        restored_dialog.close()
+        dialog.close()
+    finally:
+        for key,value in previous.items():
+            if value is None:store.remove(key)
+            else:store.setValue(key,value)
+        store.sync()
+
+
 def test_three_dot_menu_actions_and_responsive_browser_shell(tmp_path):
     window=MainWindow(initial_url="about:blank")
     window.resize(1180,760);window.show();app.processEvents()
@@ -160,7 +237,9 @@ def test_three_dot_menu_actions_and_responsive_browser_shell(tmp_path):
     assert all(not action.icon().isNull() for action in bookmark_menu.actions() if action.menu())
     saved_bookmark_action=next(action for action in window.saved_bookmarks_menu.actions() if action.text().startswith("Bookmark this page"))
     assert not saved_bookmark_action.icon().isNull()
-    window.btn_browser_menu.showMenu();app.processEvents()
+    menu=window.btn_browser_menu.menu()
+    menu.popup(window.btn_browser_menu.mapToGlobal(QPoint(0,window.btn_browser_menu.height())))
+    app.processEvents()
     window.btn_browser_menu.menu().grab().save(str(tmp_path/"lightmq-menu.png"))
     window.btn_browser_menu.menu().hide()
     count=window.tab_manager.count()

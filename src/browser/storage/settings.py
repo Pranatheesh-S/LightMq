@@ -166,6 +166,18 @@ class BrowserSettings(QObject):
             value = 100
         return (value if value in self.ZOOMS else 100) / 100
 
+    def pdf_open_in_browser(self) -> bool:
+        """Return whether PDF navigations should use Qt's internal PDF viewer."""
+        value = self.get("pdf/open_in_browser", True)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            return True
+        return bool(value)
+
     def search_provider(self) -> str:
         value = str(self.get("search/default_provider", "Google"))
         return value if value in {"Google", "Bing", "DuckDuckGo", "Brave Search", "Custom"} else "Google"

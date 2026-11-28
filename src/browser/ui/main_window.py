@@ -6,10 +6,14 @@ find-in-page, bookmarks bar, and comprehensive keyboard shortcut handling.
 """
 
 import logging
+import zipfile
+import openpyxl
+from pathlib import Path
 from PySide6.QtCore import Qt, QUrl, QSettings, QPoint, QSize
 from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
+    QDialog,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -39,8 +43,13 @@ from browser.devtools.devtools_manager import DevToolsManager
 from browser.devtools.devtools_panel import DevToolsPanel
 from browser.features.bookmarks.bookmark_manager import BookmarkManager
 from browser.features.downloads.download_manager import DownloadManager
+from browser.features.extensions.extension_controller import ExtensionController
+from browser.features.extensions.extension_assets import load_extension_icon
+from browser.features.extensions.webstore_integration import recognize_webstore_listing
 from browser.features.history.history_manager import HistoryManager
+from browser.features.recommendations.recommendation_controller import RecommendationController
 from browser.features.private_browsing.private_manager import PrivateBrowsingManager
+from browser.features.spreadsheets.spreadsheet_viewer import SpreadsheetViewer
 from browser.features.privacy.privacy_manager import PrivacyManager
 from browser.ui.address_bar import AddressBar
 from browser.ui.dialogs.bookmark_dialog import BookmarkDialog
@@ -48,6 +57,7 @@ from browser.ui.dialogs.bookmark_manager_dialog import BookmarkManagerDialog
 from browser.ui.dialogs.clear_data_dialog import ClearDataDialog
 from browser.ui.dialogs.downloads_dialog import DownloadsDialog
 from browser.ui.dialogs.history_dialog import HistoryDialog
+from browser.ui.dialogs.extensions_dialog import ExtensionsDialog
 from browser.ui.dialogs.privacy_settings_dialog import PrivacySettingsDialog
 from browser.ui.dialogs.startup_settings_dialog import StartupSettingsDialog
 from browser.ui.shortcut_manager import ShortcutManager
@@ -99,8 +109,12 @@ class MainWindow(QMainWindow):
         self._theme_manager = ThemeManager(self._browser_settings,apply_global=not is_private)
         self._icon_theme = build_palette("#1a73e8", dark=True) if is_private else self._theme_manager.palette()
         self._session_manager = None if is_private else session_manager
+        if self._session_manager is not None:
+            self._session_manager.document_factory = lambda path: SpreadsheetViewer(path)
         self._private_manager: PrivateBrowsingManager | None = None
         self._startup_settings_dialog: StartupSettingsDialog | None = None
+        self._extension_controller: ExtensionController | None = None
+        self._recommendation_controller: RecommendationController | None = None
 
         # Profile initialization
         if self._is_private:
@@ -113,6 +127,9 @@ class MainWindow(QMainWindow):
             self._base_title = f"{APP_NAME} — Incognito"
         else:
             self._profile = WebProfileManager.default_profile()
+            self._extension_controller = ExtensionController.shared_for_profile(
+                self._profile, self._settings
+            )
             self._privacy_manager = PrivacyManager(self._profile, self)
             self._permission_handler = PermissionRequestHandler(self)
             self._permission_handler.permission_requested.connect(self._show_permission_request)
@@ -131,6 +148,10 @@ class MainWindow(QMainWindow):
                 if hasattr(self, "status_bar") else None
             )
             self.download_manager = DownloadManager.get_instance()
+            self._recommendation_controller = RecommendationController(
+                HistoryManager.get_instance(), BookmarkManager.get_instance(),
+                self._browser_settings, self,
+            )
             self._base_title = APP_NAME
 
         self.setWindowTitle(self._base_title)
@@ -147,6 +168,7 @@ class MainWindow(QMainWindow):
         if self._session_manager is not None:
             self._session_manager.bind(self.tab_manager)
             self._session_manager.save_failed.connect(self._on_session_save_failed)
+            self._session_manager.restore_warning.connect(lambda message: self.status_bar.showMessage(message, 8000))
 
         # Restore before creating a fallback tab so no transient blank tab is saved.
         restored_count = (
@@ -170,6 +192,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Save the final normal session before Qt destroys tabs and child pages."""
+        for index, widget in enumerate(self.tab_manager.ordered_views()):
+            if isinstance(widget, SpreadsheetViewer) and widget.dirty:
+                if not self._close_tab_request(index, force=True):
+                    event.ignore(); return
         if self._is_private and self._private_manager is not None and not getattr(self,"_private_close_confirmed",False):
             active=self._private_manager.active_downloads()
             if active and not self._private_manager.has_other_windows(self):
@@ -178,12 +204,15 @@ class MainWindow(QMainWindow):
                     event.ignore();return
                 self._private_close_confirmed=True
                 self._private_manager.cancel_active_downloads()
+        # Stop picker listeners and restore temporary page edits before the
+        # current WebEngine pages and their isolated worlds are torn down.
+        self.devtools_manager.close()
         if self._session_manager is not None:
             self._session_manager.finish()
         if self._permission_handler is not None:
             for index in range(self.tab_manager.count()):
                 view = self.tab_manager.view_at(index)
-                if view is not None:
+                if isinstance(view, WebView):
                     self._permission_handler.cancel_for_page(view.page())
         for dialog in tuple(self._permission_dialogs.values()):
             dialog.close()
@@ -265,6 +294,10 @@ class MainWindow(QMainWindow):
 
         # 3b. Reusable DevTools Panel
         self.devtools_panel = DevToolsPanel(self.splitter,profile=self._profile)
+        panel_position = self._settings.value("devtools/panel_position", "right", type=str)
+        self.devtools_panel.position.setCurrentIndex(1 if panel_position == "bottom" else 0)
+        self.splitter.setOrientation(Qt.Orientation.Vertical if panel_position == "bottom" else Qt.Orientation.Horizontal)
+        self.devtools_panel.position_changed.connect(self._set_devtools_position)
         self.devtools_panel.hide()
         self.splitter.addWidget(self.devtools_panel)
 
@@ -276,7 +309,9 @@ class MainWindow(QMainWindow):
             devtools_panel=self.devtools_panel,
             splitter=self.splitter,
             parent=self,
+            settings=self._settings,
         )
+        self.devtools_panel.open_chromium_requested.connect(self.devtools_manager.open)
 
         # 5. Navigation Toolbar
         self._build_toolbar()
@@ -374,8 +409,23 @@ class MainWindow(QMainWindow):
 
         self.btn_devtools = IconButton("devtools", "Toggle Chromium Developer Tools (F12)", self,theme=self._icon_theme if self._is_private else None)
         self.btn_devtools.setCheckable(True)
-        self.btn_devtools.clicked.connect(self.devtools_manager.toggle)
+        self.btn_devtools.clicked.connect(self.toggle_devtools)
         self.toolbar.addWidget(self.btn_devtools)
+        self.btn_select_element = IconButton("select-element", "Select webpage element (Ctrl+Shift+C)", self, theme=self._icon_theme if self._is_private else None)
+        self.btn_select_element.clicked.connect(self.activate_inspect_element)
+        self.toolbar.addWidget(self.btn_select_element)
+        if self._extension_controller is not None:
+            self.btn_extensions = IconButton(
+                "extensions", "Extensions", self, theme=self._icon_theme
+            )
+            self.extensions_action_menu = QMenu(self.btn_extensions)
+            self.btn_extensions.setMenu(self.extensions_action_menu)
+            self.btn_extensions.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            self.toolbar.addWidget(self.btn_extensions)
+            self._extension_controller.extensions_changed.connect(
+                self._refresh_extensions_menu
+            )
+            self._refresh_extensions_menu()
         self.btn_downloads = IconButton("download", "Open Download Manager (Ctrl+J)", self,theme=self._icon_theme if self._is_private else None)
         self.btn_downloads.clicked.connect(self.open_downloads)
         self.toolbar.addWidget(self.btn_downloads)
@@ -390,12 +440,24 @@ class MainWindow(QMainWindow):
         self.btn_profile.setMenu(self.profile_menu);self.btn_profile.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup);self.toolbar.addWidget(self.btn_profile)
 
         browser_menu=QMenu(self)
+        self._add_menu_action(browser_menu,"Open File…\tCtrl+O",self.open_file,"folder")
         self._add_menu_action(browser_menu,"New Tab\tCtrl+T",self.new_tab,"plus")
         self._add_menu_action(browser_menu,"New Window\tCtrl+N",self.new_window,"new-window")
         self._add_menu_action(browser_menu,"New Incognito Window\tCtrl+Shift+N",self.new_private_window,"incognito")
         browser_menu.addSeparator()
         self._add_menu_action(browser_menu,"History\tCtrl+H",self.open_history,"history")
         self._add_menu_action(browser_menu,"Downloads\tCtrl+J",self.open_downloads,"download")
+        if self._extension_controller is not None:
+            extension_menu = browser_menu.addMenu("Extensions")
+            IconManager.set_action_icon(
+                extension_menu.menuAction(), "extensions", 18, self._icon_theme
+            )
+            self._add_menu_action(
+                extension_menu,
+                "Manage Extensions…",
+                self.open_extensions_manager,
+                "settings",
+            )
         bookmarks_menu=browser_menu.addMenu("Bookmarks")
         IconManager.set_action_icon(bookmarks_menu.menuAction(),"bookmarks",18,self._icon_theme if self._is_private else None)
         self._populate_bookmark_actions(bookmarks_menu)
@@ -417,6 +479,7 @@ class MainWindow(QMainWindow):
         self._add_menu_action(browser_menu,"Appearance & Themes",lambda:(self.open_settings(),self._settings_window.sidebar.setCurrentRow(1)),"palette")
         self._add_menu_action(browser_menu,"Settings",self.open_settings,"settings")
         self._add_menu_action(browser_menu,"Developer Tools\tF12",self.toggle_devtools,"devtools")
+        self._add_menu_action(browser_menu,"Select Element\tCtrl+Shift+C",self.activate_inspect_element,"select-element")
         if not self._is_private:
             self._add_menu_action(browser_menu,"Privacy & Security",self.open_privacy_settings,"shield")
             self._add_menu_action(browser_menu,"Startup settings",self.open_startup_settings,"tabs")
@@ -512,7 +575,7 @@ class MainWindow(QMainWindow):
         self.tab_manager.group_manager.group_changed.connect(lambda _group_id: self._sync_group_headers())
         self.tab_manager.state_changed.connect(self._sync_group_visibility)
 
-        self.tab_bar.tab_close_requested.connect(self.tab_manager.close_tab)
+        self.tab_bar.tab_close_requested.connect(self._close_tab_request)
         self.tab_bar.current_changed.connect(self.tab_manager.set_current_index)
         self.tab_bar.new_tab_requested.connect(self.new_tab)
         self.tab_bar.tab_moved.connect(self.tab_manager.move_tab)
@@ -530,10 +593,33 @@ class MainWindow(QMainWindow):
     # TabManager Event Handlers
     # --------------------------------------------------------------------------
 
-    def _on_tab_created(self, index: int, view: WebView) -> None:
+    def _on_tab_created(self, index: int, view: QWidget) -> None:
         """Handle new tab creation: add to stacked widget and connect WebEngine signals."""
+        if isinstance(view, SpreadsheetViewer):
+            self.stacked_widget.insertWidget(index, view)
+            tab_id = self.tab_manager.tab_id_for(view) or ""
+            self.tab_bar.insert_tab(index, view.title(), view.icon())
+            self.tab_bar.set_tab_id(index, tab_id)
+            self.tab_bar.set_pinned(index, self.tab_manager.is_pinned(view))
+            view.titleChanged.connect(lambda title, v=view: self._on_document_title_changed(v, title))
+            view.urlChanged.connect(lambda url, v=view: self._on_document_url_changed(v, url))
+            self._sync_group_headers(); self._sync_group_visibility()
+            return
+        view.set_pdf_viewer_enabled(self._browser_settings.pdf_open_in_browser())
         view.setZoomFactor(self._browser_settings.default_zoom())
-        view.configure_start_page(self._browser_settings.store,self._browser_settings.search_template(),self._theme_manager.palette(),self._is_private)
+        context_view = self.tab_manager.current_view()
+        context_url = context_view.url().toString() if isinstance(context_view, WebView) else ""
+        context_title = context_view.title() if isinstance(context_view, WebView) else ""
+        if context_url.startswith(("lightmq:", "file:", "about:")) or (isinstance(context_view, WebView) and context_view.page().is_pdf_document()):
+            context_url = ""; context_title = ""
+        view.configure_start_page(
+            self._browser_settings.store, self._browser_settings.search_template(),
+            self._theme_manager.palette(), self._is_private,
+            recommendations=self._recommendation_controller,
+            context_url=context_url, context_title=context_title,
+        )
+        if not self._is_private:
+            view._new_tab_bridge.openRecommendationRequested.connect(self._open_newtab_recommendation)
         self.stacked_widget.insertWidget(index, view)
         tab_id = self.tab_manager.tab_id_for(view) or ""
         self.tab_bar.insert_tab(index, getattr(view, "restored_title", "") or "New Tab", view.icon())
@@ -549,6 +635,9 @@ class MainWindow(QMainWindow):
         view.loadStarted.connect(lambda v=view: self._on_tab_load_started(v))
         view.loadProgress.connect(lambda prog, v=view: self._on_tab_load_progress(v, prog))
         view.loadFinished.connect(lambda ok, v=view: self._on_tab_load_finished(v, ok))
+        view.page().pdf_document_changed.connect(
+            lambda is_pdf, v=view: self._pdf_document_state_changed(v, is_pdf)
+        )
         if self._permission_handler is not None:
             self._permission_handler.attach_page(view.page())
         view.page().main_frame_navigation_requested.connect(
@@ -566,6 +655,8 @@ class MainWindow(QMainWindow):
 
     def _on_tab_closing(self, index: int, view: WebView) -> None:
         """Prepare for tab destruction: detach DevTools if currently attached."""
+        if not isinstance(view, WebView):
+            return
         self.devtools_manager.on_view_closing(view)
         self._loading_states.pop(view, None)
         self._history_navigation_pending.pop(view, None)
@@ -581,13 +672,26 @@ class MainWindow(QMainWindow):
             self.stacked_widget.removeWidget(widget)
         self._sync_group_headers()
 
-    def _on_current_tab_changed(self, index: int, view: WebView) -> None:
+    def _on_current_tab_changed(self, index: int, view: QWidget) -> None:
         """Switch active tab: update UI, toolbar, address bar, find bar, and DevTools."""
         self.tab_bar.set_current_index(index)
         self.stacked_widget.setCurrentWidget(view)
+        self._refresh_extensions_menu()
+
+        if isinstance(view, SpreadsheetViewer):
+            self.devtools_manager.set_target_view(None)
+            self.find_bar.close_and_clear()
+            self.address_bar.set_url(view.url())
+            self._update_bookmark_button("")
+            self.setWindowTitle(f"{view.title()} - {self._base_title}")
+            self.action_back.setEnabled(False); self.action_forward.setEnabled(False)
+            self.action_reload.setEnabled(False); self.action_stop.setVisible(False)
+            self.progress_bar.hide(); self._refresh_zoom_label()
+            return
 
         # Attach DevTools to the new active page
-        self.devtools_manager.set_target_view(view)
+        self.devtools_manager.set_target_view(None if view.page().is_pdf_document() else view)
+        self.action_reload.setEnabled(True)
 
         # Synchronize find bar with newly active tab
         self.find_bar.set_active_view(view)
@@ -596,8 +700,9 @@ class MainWindow(QMainWindow):
         current_url = view.url()
         self.address_bar.set_url(current_url)
         self._update_bookmark_button(current_url.toString())
+        self._sync_pdf_find_shortcut(view)
 
-        title = view.title()
+        title = view.page().pdf_display_title() or view.title()
         if title:
             self.setWindowTitle(f"{title} - {self._base_title}")
         else:
@@ -682,8 +787,8 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self)
         self._add_menu_action(menu,"New Tab",self.new_tab,"plus")
-        self._add_menu_action(menu,"Reload",view.reload,"reload")
-        self._add_menu_action(menu,"Duplicate Tab",lambda: self.tab_manager.duplicate_tab(self.tab_manager.index_of(view)),"new-window")
+        if isinstance(view, WebView): self._add_menu_action(menu,"Reload",view.reload,"reload")
+        if isinstance(view, WebView): self._add_menu_action(menu,"Duplicate Tab",lambda: self.tab_manager.duplicate_tab(self.tab_manager.index_of(view)),"new-window")
         pinned = self.tab_manager.is_pinned(view)
         self._add_menu_action(menu,"Unpin Tab" if pinned else "Pin Tab",lambda: self._toggle_pin(view),"pin")
         group = self.tab_manager.group_manager.group_for_tab(self.tab_manager.tab_id_for(view))
@@ -700,9 +805,9 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         reopen = self._add_menu_action(menu,"Reopen Closed Tab",self.restore_closed_tab,"history")
         reopen.setEnabled(self.tab_manager.closed_tabs_count() > 0)
-        self._add_menu_action(menu,"Close Tab",lambda: self.tab_manager.close_tab(self.tab_manager.index_of(view), force=True),"close")
-        self._add_menu_action(menu,"Close Other Tabs",lambda: self.tab_manager.close_other_tabs(self.tab_manager.index_of(view)),"tabs")
-        self._add_menu_action(menu,"Close Tabs to the Right",lambda: self.tab_manager.close_tabs_to_right(self.tab_manager.index_of(view)),"arrow-right")
+        self._add_menu_action(menu,"Close Tab",lambda: self._close_tab_request(self.tab_manager.index_of(view), force=True),"close")
+        self._add_menu_action(menu,"Close Other Tabs",lambda: self._close_many_tabs(self.tab_manager.index_of(view), "other"),"tabs")
+        self._add_menu_action(menu,"Close Tabs to the Right",lambda: self._close_many_tabs(self.tab_manager.index_of(view), "right"),"arrow-right")
         menu.exec(global_pos)
 
     def _toggle_pin(self, view: WebView) -> None:
@@ -753,7 +858,10 @@ class MainWindow(QMainWindow):
             return
         if len(group.tab_ids) > 1 and QMessageBox.question(self, "Close Tab Group", f"Close all {len(group.tab_ids)} tabs in ‘{group.name}’?") != QMessageBox.StandardButton.Yes:
             return
-        self.tab_manager.close_group(group_id)
+        for tab_id in tuple(group.tab_ids):
+            target = self.tab_manager.view_for_tab_id(tab_id)
+            if target is not None and not self._close_tab_request(self.tab_manager.index_of(target), force=True):
+                return
 
     # --------------------------------------------------------------------------
     # WebEngine Event Handlers (Dispatched with view context)
@@ -761,13 +869,14 @@ class MainWindow(QMainWindow):
 
     def _on_tab_title_changed(self, view: WebView, title: str) -> None:
         """Update tab label and, if active, update the window title."""
+        display_title = view.page().pdf_display_title() or title
         idx = self.tab_manager.index_of(view)
         if idx != -1:
-            self.tab_bar.set_tab_title(idx, title or "New Tab")
+            self.tab_bar.set_tab_title(idx, display_title or "New Tab")
 
         if view is self.tab_manager.current_view():
-            if title:
-                self.setWindowTitle(f"{title} - {self._base_title}")
+            if display_title:
+                self.setWindowTitle(f"{display_title} - {self._base_title}")
             else:
                 self.setWindowTitle(self._base_title)
 
@@ -804,6 +913,7 @@ class MainWindow(QMainWindow):
             self.address_bar.set_url(url)
             self._update_bookmark_button(url.toString())
             self._update_navigation_actions(view)
+            self._refresh_extensions_menu()
 
     def _on_tab_load_started(self, view: WebView) -> None:
         """Record loading state."""
@@ -882,7 +992,7 @@ class MainWindow(QMainWindow):
         """Keep the menu zoom percentage in sync with the selected tab."""
         view=self.tab_manager.current_view()
         if hasattr(self,"zoom_percent"):
-            self.zoom_percent.setText(f"{int(round(view.zoomFactor()*100)) if view else 100}%")
+            self.zoom_percent.setText(f"{int(round(view.zoomFactor()*100)) if isinstance(view, WebView) else 100}%")
 
     def navigate_to(self, text: str) -> None:
         """Instruct the active tab to navigate to the normalized target URL."""
@@ -895,38 +1005,155 @@ class MainWindow(QMainWindow):
                 and ("." in value or value.startswith(("localhost", "127.0.0.1", "[")))
             )
             target_url = normalize_url(value) if looks_url else QUrl(self._browser_settings.search_url(value))
+            if isinstance(active_view, SpreadsheetViewer):
+                self.tab_manager.create_tab(url=target_url, activate=True)
+                return
             self.status_bar.showMessage(f"Navigating to {target_url.toString()}...", 2000)
             active_view.navigate(target_url)
+
+    def open_pdf_file(self) -> WebView | None:
+        """Open a validated local PDF in a new tab using a file URL."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open File",
+            "",
+            "PDF documents (*.pdf);;All files (*)",
+        )
+        if not filename:
+            return None
+        path = Path(filename).expanduser()
+        try:
+            path = path.resolve(strict=True)
+            if not path.is_file():
+                raise OSError("The selected path is not a file.")
+            with path.open("rb") as source:
+                signature = source.read(1024)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not open PDF", f"The selected file cannot be read.\n\n{exc}")
+            return None
+        if b"%PDF-" not in signature:
+            QMessageBox.warning(
+                self,
+                "Invalid PDF",
+                "The selected file does not have a valid PDF header.",
+            )
+            return None
+        view = self.tab_manager.create_tab(QUrl.fromLocalFile(str(path)), activate=True)
+        self.status_bar.showMessage(f"Opened {path.name}", 3000)
+        return view
+
+    def open_file(self) -> QWidget | None:
+        """Open a supported local PDF or .xlsx document in a new tab."""
+        filename, _ = QFileDialog.getOpenFileName(self, "Open File", "", "Supported documents (*.pdf *.xlsx);;PDF documents (*.pdf);;Excel workbooks (*.xlsx)")
+        if not filename: return None
+        return self.open_local_document(filename)
+
+    def open_local_document(self, filename: str) -> QWidget | None:
+        """Open a validated local document from a dialog or command line."""
+        if Path(filename).suffix.lower() == ".xlsx":
+            try:
+                viewer = SpreadsheetViewer(Path(filename).expanduser())
+            except (OSError, ValueError, zipfile.BadZipFile, openpyxl.utils.exceptions.InvalidFileException) as exc:
+                QMessageBox.warning(self, "Could not open workbook", str(exc)); return None
+            self.tab_manager.create_document_tab(viewer, viewer.url(), viewer.title(), activate=True)
+            self.status_bar.showMessage(f"Opened {Path(filename).name}", 3000)
+            return viewer
+        if Path(filename).suffix.lower() == ".pdf":
+            path = Path(filename).expanduser()
+            try:
+                path = path.resolve(strict=True)
+                with path.open("rb") as source: signature = source.read(1024)
+            except OSError as exc:
+                QMessageBox.warning(self, "Could not open PDF", f"The selected file cannot be read.\n\n{exc}"); return None
+            if b"%PDF-" not in signature:
+                QMessageBox.warning(self, "Invalid PDF", "The selected file does not have a valid PDF header."); return None
+            return self.tab_manager.create_tab(QUrl.fromLocalFile(str(path)), activate=True)
+        QMessageBox.information(self, "Unsupported file", "LightMq opens PDF and .xlsx files.")
+        return None
+
+    def _on_document_title_changed(self, view: SpreadsheetViewer, title: str) -> None:
+        index = self.tab_manager.index_of(view)
+        if index >= 0:
+            self.tab_bar.set_tab_title(index, title)
+            if view is self.tab_manager.current_view(): self.setWindowTitle(f"{title} - {self._base_title}")
+
+    def _on_document_url_changed(self, view: SpreadsheetViewer, url: QUrl) -> None:
+        if view is self.tab_manager.current_view(): self.address_bar.set_url(url)
+
+    def _close_tab_request(self, index: int, force: bool = False) -> bool:
+        """Ask before discarding an edited workbook, then close the tab."""
+        view = self.tab_manager.view_at(index)
+        if isinstance(view, SpreadsheetViewer) and view.dirty:
+            box = QMessageBox(self); box.setWindowTitle("Unsaved workbook changes")
+            box.setText(f"Save changes to {view.path.name} before closing?")
+            save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+            discard = box.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
+            cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            if box.clickedButton() is cancel: return False
+            if box.clickedButton() is save and not view.save_as(): return False
+            if box.clickedButton() not in (save, discard): return False
+        return self.tab_manager.close_tab(index, force=force)
+
+    def _close_many_tabs(self, index: int, direction: str) -> int:
+        keep = self.tab_manager.view_at(index)
+        ordered = list(self.tab_manager.ordered_views())
+        targets = ([item for item in ordered if item is not keep and not self.tab_manager.is_pinned(item)]
+                   if direction == "other" else [item for item in ordered[index + 1:] if not self.tab_manager.is_pinned(item)])
+        count = 0
+        for item in targets:
+            if not self._close_tab_request(self.tab_manager.index_of(item), force=True): break
+            count += 1
+        if keep is not None: self.tab_manager.set_current_index(self.tab_manager.index_of(keep))
+        return count
+
+    def _pdf_document_state_changed(self, view: WebView, is_pdf: bool) -> None:
+        """Let native PDF search receive Ctrl+F while a PDF tab is active."""
+        self._on_tab_title_changed(view, view.title())
+        if view is self.tab_manager.current_view():
+            self.devtools_manager.set_target_view(None if is_pdf else view)
+            if is_pdf:
+                self.find_bar.close_and_clear()
+            self._sync_pdf_find_shortcut(view)
+
+    def _sync_pdf_find_shortcut(self, view: WebView | None) -> None:
+        """Yield Ctrl+F to Qt's PDF viewer for PDF tabs; keep webpage find UI otherwise."""
+        manager = getattr(self, "shortcut_manager", None)
+        if manager is not None:
+            manager.set_action_enabled(
+                "open_find_in_page",
+                not (isinstance(view, WebView) and view.page().is_pdf_document()),
+            )
 
     def back(self) -> None:
         """Navigate back on the active tab."""
         view = self.tab_manager.current_view()
-        if view is not None:
+        if isinstance(view, WebView):
             view.back()
 
     def forward(self) -> None:
         """Navigate forward on the active tab."""
         view = self.tab_manager.current_view()
-        if view is not None:
+        if isinstance(view, WebView):
             view.forward()
 
     def reload(self) -> None:
         """Reload the active tab."""
         view = self.tab_manager.current_view()
-        if view is not None:
+        if isinstance(view, WebView):
             view.reload()
 
     def reload_bypass_cache(self) -> None:
         """Reload the active tab while bypassing cached resources."""
         view = self.tab_manager.current_view()
-        if view is not None:
+        if isinstance(view, WebView):
             view.triggerPageAction(QWebEnginePage.WebAction.ReloadAndBypassCache)
             self.status_bar.showMessage("Reloading (bypassing cache)...", 2000)
 
     def stop(self) -> None:
         """Stop loading on the active tab."""
         view = self.tab_manager.current_view()
-        if view is not None:
+        if isinstance(view, WebView):
             view.stop()
 
     def stop_or_dismiss(self) -> None:
@@ -963,9 +1190,16 @@ class MainWindow(QMainWindow):
         url = "about:blank" if behavior == "Blank Page" else self._startup_settings.homepage() if behavior == "Homepage" else DEFAULT_START_URL
         return self.tab_manager.create_tab(url, activate=True)
 
+    def _open_newtab_recommendation(self, url: str, new_tab: bool) -> None:
+        """Open a safe recommendation in the current tab or a newly created tab."""
+        if new_tab:
+            self.tab_manager.create_tab(url=url, activate=True)
+        else:
+            self.navigate_to(url)
+
     def close_tab(self) -> None:
         """Close the currently active tab."""
-        self.tab_manager.close_current_tab()
+        self._close_tab_request(self.tab_manager.current_index())
 
     def restore_closed_tab(self) -> WebView | None:
         """Restore the most recently closed tab."""
@@ -1010,6 +1244,15 @@ class MainWindow(QMainWindow):
 
     def open_find_in_page(self) -> None:
         """Open or focus the find-in-page toolbar."""
+        view = self.tab_manager.current_view()
+        if isinstance(view, SpreadsheetViewer):
+            view.search.setFocus(); view.search.selectAll(); return
+        if isinstance(view, WebView) and view.page().is_pdf_document():
+            self.status_bar.showMessage(
+                "Use the PDF reader's Find control or press Ctrl+F.", 3500
+            )
+            view.setFocus()
+            return
         self.find_bar.show_and_focus()
 
     def bookmark_current_page(self) -> None:
@@ -1108,9 +1351,9 @@ class MainWindow(QMainWindow):
         dialog.show();dialog.raise_();dialog.activateWindow();return dialog
 
     def print_current_page(self) -> None:
-        """Print the active tab's webpage."""
+        """Open the native printer dialog for the active webpage or PDF viewer."""
         view = self.tab_manager.current_view()
-        if view is None:
+        if not isinstance(view, WebView):
             return
 
         try:
@@ -1130,6 +1373,14 @@ class MainWindow(QMainWindow):
         view = self.tab_manager.current_view()
         if view is None:
             return
+        if isinstance(view, SpreadsheetViewer):
+            view.save(); return
+
+        if isinstance(view, WebView) and view.page().is_pdf_document():
+            # QWebEnginePage.download uses the page's existing profile, preserving
+            # cookies and authentication; DownloadHandler owns destination prompts.
+            view.page().download(view.url())
+            return
 
         safe_title = "".join(c for c in (view.title() or "webpage") if c.isalnum() or c in " ._-").strip()
         default_filename = f"{safe_title or 'page'}.html"
@@ -1148,13 +1399,18 @@ class MainWindow(QMainWindow):
                 logger.error("Failed to save webpage: %s", e)
                 self.status_bar.showMessage("Failed to save page.", 3000)
 
+    def save_active_document_as(self) -> None:
+        """Save the active spreadsheet to a user-selected copy."""
+        view = self.tab_manager.current_view()
+        if isinstance(view, SpreadsheetViewer): view.save_as()
+
     # --------------------------------------------------------------------------
     # Browser Management (History, Downloads, Clear Data, Fullscreen, Zoom)
     # --------------------------------------------------------------------------
 
     def open_history(self) -> None:
         """Open the browsing history dialog."""
-        self._history_dialog = HistoryDialog(parent=self)
+        self._history_dialog = HistoryDialog(parent=self, recommendation_controller=self._recommendation_controller)
         self._history_dialog.open_url_requested.connect(self.navigate_to)
         self._history_dialog.open_in_new_tab_requested.connect(
             lambda url: self.tab_manager.create_tab(url=url, activate=True)
@@ -1168,6 +1424,91 @@ class MainWindow(QMainWindow):
         self._downloads_dialog.show()
         self._downloads_dialog.raise_()
         self._downloads_dialog.activateWindow()
+
+    def open_extensions_manager(self) -> ExtensionsDialog | None:
+        """Open the native manager bound to this window's shared regular profile."""
+        if self._is_private or self._extension_controller is None:
+            return None
+        dialog = getattr(self, "_extensions_dialog", None)
+        if dialog is None:
+            dialog = ExtensionsDialog(self._extension_controller, self)
+            self._extensions_dialog = dialog
+        dialog.refresh()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    def _refresh_extensions_menu(self) -> None:
+        """Show only enabled extensions with Qt-reported action popup URLs."""
+        menu = getattr(self, "extensions_action_menu", None)
+        controller = self._extension_controller
+        if menu is None or controller is None:
+            return
+        menu.clear()
+        active_view = self.tab_manager.current_view()
+        active_url = active_view.url().toString() if isinstance(active_view, WebView) else ""
+        if recognize_webstore_listing(active_url) is not None:
+            self._add_menu_action(
+                menu,
+                "View Compatibility in LightMq…",
+                lambda _checked=False, current_url=active_url: self._inspect_store_listing(
+                    current_url
+                ),
+                "extensions",
+            )
+            menu.addSeparator()
+        actions = [
+            extension
+            for extension in controller.user_extensions()
+            if controller.open_popup_url(extension.id())
+        ]
+        for extension in actions:
+            action = self._add_menu_action(
+                menu,
+                extension.name() or "Extension",
+                lambda _checked=False, extension_id=extension.id(): self._open_extension_popup(
+                    extension_id
+                ),
+                "extensions",
+            )
+            package_icon = load_extension_icon(controller.installed_package(extension))
+            if not package_icon.isNull():
+                action.setIcon(package_icon)
+            action.setToolTip("Open the extension action popup provided by Qt WebEngine")
+        if not actions:
+            empty = menu.addAction("No enabled extension popups")
+            empty.setEnabled(False)
+        menu.addSeparator()
+        self._add_menu_action(
+            menu, "Manage Extensions…", self.open_extensions_manager, "settings"
+        )
+
+    def _inspect_store_listing(self, url: str) -> None:
+        """Open the native compatibility flow for a recognized store listing."""
+        dialog = self.open_extensions_manager()
+        if dialog is not None:
+            dialog.inspect_webstore_listing(url)
+
+    def _open_extension_popup(self, extension_id: str) -> None:
+        """Open only a popup URL exposed by the enabled Qt extension metadata."""
+        controller = self._extension_controller
+        if controller is None:
+            return
+        url_text = controller.open_popup_url(extension_id)
+        extension = controller.extension(extension_id)
+        if not url_text or extension is None:
+            self._refresh_extensions_menu()
+            return
+        window = QDialog(self, Qt.WindowType.Tool)
+        window.setWindowTitle(extension.name() or "Extension")
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        window.resize(360, 480)
+        layout = QVBoxLayout(window)
+        view = WebView(profile=controller.profile, parent=window)
+        view.setUrl(QUrl(url_text))
+        layout.addWidget(view)
+        window.show()
 
     def _show_download_notification(self, message: str, timeout_ms: int) -> None:
         """Show a lightweight transfer status in the browser status bar."""
@@ -1217,7 +1558,8 @@ class MainWindow(QMainWindow):
         """Show or raise the existing centralized Settings window."""
         dialog = getattr(self, "_settings_window", None)
         if dialog is None:
-            dialog = SettingsWindow(self._browser_settings, self._startup_settings, self)
+            dialog = SettingsWindow(self._browser_settings, self._startup_settings, self,
+                                   recommendation_controller=self._recommendation_controller)
             dialog.finished.connect(lambda _result: setattr(self, "_settings_window", None))
             self._settings_window = dialog
         dialog.show(); dialog.raise_(); dialog.activateWindow()
@@ -1229,11 +1571,22 @@ class MainWindow(QMainWindow):
             for window in tuple(MainWindow._all_windows):
                 if not window.is_private:
                     if not applied:window._theme_manager.apply();applied=True
-                    for view in window.tab_manager.ordered_views():view.update_start_page_theme(window._theme_manager.palette(),window._browser_settings.search_template())
+                    for view in window.tab_manager.ordered_views():
+                        if isinstance(view, WebView): view.update_start_page_theme(window._theme_manager.palette(),window._browser_settings.search_template())
         elif key.startswith("search/"):
             for window in tuple(MainWindow._all_windows):
                 template=window._browser_settings.search_template()
-                for view in window.tab_manager.ordered_views():view.update_start_page_theme(window._theme_manager.palette(),template)
+                for view in window.tab_manager.ordered_views():
+                    if isinstance(view, WebView): view.update_start_page_theme(window._theme_manager.palette(),template)
+        elif key == "pdf/open_in_browser":
+            enabled = self._browser_settings.pdf_open_in_browser()
+            for window in tuple(MainWindow._all_windows):
+                for view in window.tab_manager.ordered_views():
+                    if isinstance(view, WebView): view.set_pdf_viewer_enabled(enabled)
+        elif key.startswith("recommendations/"):
+            for window in tuple(MainWindow._all_windows):
+                if window._recommendation_controller is not None:
+                    window._recommendation_controller.invalidate()
 
     def _on_session_save_failed(self, message: str) -> None:
         """Surface session persistence errors without interrupting navigation."""
@@ -1296,6 +1649,8 @@ class MainWindow(QMainWindow):
         if dialog.clear_history:
             start, end = dialog.history_range()
             HistoryManager.get_instance().clear(start=start, end=end)
+            if start is None and end is None and self._recommendation_controller is not None:
+                self._recommendation_controller.clear_data(keep_pins=dialog.keep_recommendation_pins)
             summary.append("History deletion completed in LightMq.")
         if dialog.clear_cache:
             if self._privacy_manager.cache.clear():
@@ -1337,7 +1692,7 @@ class MainWindow(QMainWindow):
     def zoom_in(self) -> None:
         """Increase the active view's zoom factor by 10% (max 500%)."""
         view = self.tab_manager.current_view()
-        if view is not None:
+        if isinstance(view, WebView):
             new_zoom = min(5.0, round(view.zoomFactor() + 0.1, 2))
             view.setZoomFactor(new_zoom)
             self._refresh_zoom_label()
@@ -1346,7 +1701,7 @@ class MainWindow(QMainWindow):
     def zoom_out(self) -> None:
         """Decrease the active view's zoom factor by 10% (min 25%)."""
         view = self.tab_manager.current_view()
-        if view is not None:
+        if isinstance(view, WebView):
             new_zoom = max(0.25, round(view.zoomFactor() - 0.1, 2))
             view.setZoomFactor(new_zoom)
             self._refresh_zoom_label()
@@ -1355,7 +1710,7 @@ class MainWindow(QMainWindow):
     def reset_zoom(self) -> None:
         """Reset the active view's zoom factor to 100%."""
         view = self.tab_manager.current_view()
-        if view is not None:
+        if isinstance(view, WebView):
             view.setZoomFactor(1.0)
             self._refresh_zoom_label()
             self.status_bar.showMessage("Zoom: 100%", 2000)
@@ -1366,10 +1721,17 @@ class MainWindow(QMainWindow):
 
     def toggle_devtools(self) -> None:
         """Toggle Chromium Developer Tools panel."""
+        if self.devtools_manager.is_open():
+            self.devtools_manager.close(); return
+        view = self.tab_manager.current_view()
+        if not isinstance(view, WebView) or view.page().is_pdf_document():
+            self.status_bar.showMessage("Developer Tools are available for web pages, not document tabs.", 3500); return
         self.devtools_manager.toggle()
 
     def open_js_console(self) -> None:
         """Open LightMq's bounded page console."""
+        if not isinstance(self.tab_manager.current_view(), WebView):
+            self.status_bar.showMessage("The page console is available for web pages.", 3500); return
         if not self.devtools_manager.is_open():
             self.devtools_manager.open()
         self.devtools_panel.mode.setCurrentIndex(1)
@@ -1379,17 +1741,26 @@ class MainWindow(QMainWindow):
 
     def activate_inspect_element(self) -> None:
         """Open LightMq's non-persistent element picker."""
+        view = self.tab_manager.current_view()
+        if not isinstance(view, WebView) or view.page().is_pdf_document():
+            self.status_bar.showMessage("Inspect Element is available for web pages.", 3500); return
         if not self.devtools_manager.is_open():
             self.devtools_manager.open()
         self.devtools_panel.mode.setCurrentIndex(1)
         self.devtools_panel.tools.setCurrentWidget(self.devtools_panel.dom)
-        self.devtools_panel.dom.start_picker()
-        self.status_bar.showMessage("Inspect Element active", 2000)
+        self.devtools_panel.dom.toggle_picker()
+        self.status_bar.showMessage("Element picker toggled", 2000)
+
+    def _set_devtools_position(self, position: str) -> None:
+        """Dock the resizable developer panel on the right or bottom and remember it."""
+        value = "bottom" if position == "bottom" else "right"
+        self.splitter.setOrientation(Qt.Orientation.Vertical if value == "bottom" else Qt.Orientation.Horizontal)
+        self._settings.setValue("devtools/panel_position", value)
 
     def view_page_source(self) -> None:
         """Open the active tab's HTML source in a new tab using view-source: scheme."""
         view = self.tab_manager.current_view()
-        if view is None:
+        if not isinstance(view, WebView):
             return
 
         url_str = view.url().toString()

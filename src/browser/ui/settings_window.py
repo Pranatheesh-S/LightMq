@@ -20,17 +20,34 @@ from browser.ui.icons.icon_manager import IconManager
 class SettingsWindow(QDialog):
     """Resizable settings categories sharing application QSettings."""
 
-    CATEGORIES = ("General", "Appearance", "Search", "Tabs", "Downloads", "Bookmarks", "Privacy & Security", "Keyboard Shortcuts", "Advanced")
+    CATEGORIES = ("General", "Appearance", "Search", "Tabs", "Downloads & PDF", "Bookmarks", "Privacy & Security", "Keyboard Shortcuts", "Recommendations", "Advanced")
 
-    def __init__(self, browser_settings: BrowserSettings, startup: StartupSettings, parent=None):
+    @staticmethod
+    def _preference_bool(settings: BrowserSettings, key: str, default: bool) -> bool:
+        """Read booleans consistently from QSettings INI and native backends."""
+        value = settings.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off", ""}:
+                return False
+        return default
+
+    def __init__(self, browser_settings: BrowserSettings, startup: StartupSettings, parent=None, recommendation_controller=None):
         super().__init__(parent)
         self.settings, self.startup = browser_settings, startup
+        self.recommendation_controller = recommendation_controller
         self.setWindowTitle("LightMq Settings")
         self.setMinimumSize(640, 480)
         self.resize(900, 650)
         root = QHBoxLayout(self)
         self.sidebar = QListWidget(self)
-        sidebar_icons=("settings","palette","search","tabs","download","bookmarks","shield","keyboard","sliders")
+        sidebar_icons=("settings","palette","search","tabs","download","bookmarks","shield","keyboard","search","sliders")
         icon_theme=getattr(self.parent(),"_icon_theme",None)
         for category,icon_name in zip(self.CATEGORIES,sidebar_icons):
             item=QListWidgetItem(category)
@@ -44,7 +61,7 @@ class SettingsWindow(QDialog):
         root.addWidget(self.sidebar)
         root.addWidget(self.pages, 1)
         self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
-        builders = (self._general, self._appearance, self._search, self._tabs, self._downloads, self._bookmarks, self._privacy, self._shortcuts, self._advanced)
+        builders = (self._general, self._appearance, self._search, self._tabs, self._downloads, self._bookmarks, self._privacy, self._shortcuts, self._recommendations, self._advanced)
         for builder in builders:
             scroll = QScrollArea(self)
             scroll.setWidgetResizable(True)
@@ -295,7 +312,7 @@ class SettingsWindow(QDialog):
         form.addRow("Restore previous session", self.restore)
 
     def _downloads(self, layout):
-        form = self._page(layout, "Downloads", "Download directory and save prompts")
+        form = self._page(layout, "Downloads & PDF", "Download handling and PDF documents")
         self.download_dir = QLineEdit(str(self.settings.get("downloads/default_directory", "")))
         self.download_dir.editingFinished.connect(lambda: self.settings.set("downloads/default_directory", self.download_dir.text().strip()))
         form.addRow("Default directory (blank uses system Downloads)", self.download_dir)
@@ -303,6 +320,26 @@ class SettingsWindow(QDialog):
         self.ask_download.setCurrentIndex(0 if bool(self.settings.get("downloads/ask_before_saving", True)) else 1)
         self.ask_download.currentIndexChanged.connect(lambda i: self.settings.set("downloads/ask_before_saving", i == 0))
         form.addRow("Save behavior", self.ask_download)
+
+        self.pdf_handling = QComboBox(self)
+        self.pdf_handling.addItem("Open PDFs inside LightMq", True)
+        self.pdf_handling.addItem("Download PDFs instead", False)
+        self.pdf_handling.setCurrentIndex(0 if self.settings.pdf_open_in_browser() else 1)
+        self.pdf_handling.currentIndexChanged.connect(
+            lambda index: self.settings.set(
+                "pdf/open_in_browser", bool(self.pdf_handling.itemData(index))
+            )
+        )
+        form.addRow("PDF documents", self.pdf_handling)
+
+        pdf_note = QLabel(
+            "Inline PDFs use Qt WebEngine's built-in reader for page navigation, zoom, "
+            "search, download, and print. The reader does not expose a separate default "
+            "PDF zoom setting through Qt's supported API; use its zoom controls.",
+            self,
+        )
+        pdf_note.setWordWrap(True)
+        form.addRow(pdf_note)
 
     def _bookmarks(self, layout):
         self._page(layout, "Bookmarks", "Manage saved websites and transfer bookmarks using browser-compatible HTML files.")
@@ -366,6 +403,94 @@ class SettingsWindow(QDialog):
         for action, sequence in proposed.items():
             self.settings.set(f"shortcuts/{action}", sequence)
 
+    def _recommendations(self, layout):
+        form = self._page(
+            layout, "Recommendations",
+            "Optional suggestions are calculated locally from LightMq history, bookmark titles, and the page that opened this tab. No page content is read or sent to a service.",
+        )
+        self.recommendations_enabled = QCheckBox("Enable personalized local recommendations", self)
+        self.recommendations_enabled.setChecked(self._preference_bool(self.settings, "recommendations/enabled", False))
+        self.recommendations_enabled.toggled.connect(lambda value: self.settings.set("recommendations/enabled", value))
+        form.addRow("Personalization", self.recommendations_enabled)
+        self.recommendations_history = QCheckBox("Use eligible browsing history", self)
+        self.recommendations_history.setChecked(self._preference_bool(self.settings, "recommendations/source_history", True))
+        self.recommendations_history.toggled.connect(lambda value: self.settings.set("recommendations/source_history", value))
+        form.addRow("Sources", self.recommendations_history)
+        self.recommendations_bookmarks = QCheckBox("Use saved bookmarks", self)
+        self.recommendations_bookmarks.setChecked(self._preference_bool(self.settings, "recommendations/source_bookmarks", True))
+        self.recommendations_bookmarks.toggled.connect(lambda value: self.settings.set("recommendations/source_bookmarks", value))
+        form.addRow("", self.recommendations_bookmarks)
+        self.recommendations_show_new_tab = QCheckBox("Show recommendations on the LightMq New Tab page", self)
+        self.recommendations_show_new_tab.setChecked(self._preference_bool(self.settings, "recommendations/show_new_tab", True))
+        self.recommendations_show_new_tab.toggled.connect(lambda value: self.settings.set("recommendations/show_new_tab", value))
+        form.addRow("Display", self.recommendations_show_new_tab)
+        self.recommendations_continue = QCheckBox("Show Continue Browsing", self)
+        self.recommendations_continue.setChecked(self._preference_bool(self.settings, "recommendations/show_continue", True))
+        self.recommendations_continue.toggled.connect(lambda value: self.settings.set("recommendations/show_continue", value))
+        form.addRow("", self.recommendations_continue)
+        self.recommendations_related = QCheckBox("Show pages related by title, hostname, or bookmark folder terms", self)
+        self.recommendations_related.setChecked(self._preference_bool(self.settings, "recommendations/show_related", True))
+        self.recommendations_related.toggled.connect(lambda value: self.settings.set("recommendations/show_related", value))
+        form.addRow("", self.recommendations_related)
+        self.recommendations_note = QLabel(
+            "Incognito tabs never collect or display recommendations. Hiding and pinning are saved locally. Related-page suggestions use word overlap, not semantic understanding.", self
+        )
+        self.recommendations_note.setWordWrap(True)
+        form.addRow("Privacy", self.recommendations_note)
+        actions = QHBoxLayout()
+        self.manage_hidden_button = QPushButton("Manage Hidden Websites…", self)
+        self.manage_hidden_button.clicked.connect(self._manage_hidden_recommendations)
+        actions.addWidget(self.manage_hidden_button)
+        self.clear_recommendation_data_button = QPushButton("Clear Recommendation Data…", self)
+        self.clear_recommendation_data_button.clicked.connect(self._clear_recommendation_data)
+        actions.addWidget(self.clear_recommendation_data_button)
+        layout.addLayout(actions)
+        if self.recommendation_controller is None or getattr(self.parent(), "_is_private", False):
+            for widget in (self.recommendations_enabled, self.recommendations_history, self.recommendations_bookmarks,
+                           self.recommendations_show_new_tab, self.recommendations_continue, self.recommendations_related,
+                           self.manage_hidden_button, self.clear_recommendation_data_button):
+                widget.setEnabled(False)
+            self.recommendations_note.setText("Recommendations are unavailable in Incognito. Open a regular LightMq window to manage local recommendation preferences.")
+
+    def _manage_hidden_recommendations(self):
+        controller = self.recommendation_controller
+        if controller is None:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Hidden Recommendations")
+        dialog.resize(520, 380)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Websites hidden from local recommendations"))
+        items = QListWidget(dialog)
+        for record in controller.hidden_recommendations():
+            label = record.get("title") or record.get("domain") or record.get("url_key", "")
+            item = QListWidgetItem(f"{label}  ·  {record.get('domain', '')}")
+            item.setData(Qt.ItemDataRole.UserRole, record.get("url_key", ""))
+            items.addItem(item)
+        layout.addWidget(items, 1)
+        row = QHBoxLayout(); unhide = QPushButton("Unhide Selected", dialog); close = QPushButton("Close", dialog)
+        row.addWidget(unhide); row.addStretch(); row.addWidget(close); layout.addLayout(row)
+        def reveal_selected():
+            item = items.currentItem()
+            if item is None:
+                return
+            controller.reveal(str(item.data(Qt.ItemDataRole.UserRole)))
+            items.takeItem(items.row(item))
+        unhide.clicked.connect(reveal_selected); close.clicked.connect(dialog.accept)
+        dialog.exec()
+
+    def _clear_recommendation_data(self):
+        controller = self.recommendation_controller
+        if controller is None:
+            return
+        answer = QMessageBox.question(
+            self, "Clear Recommendation Data",
+            "Remove pinned shortcuts, hidden recommendations, and local recommendation feedback? This does not clear history, bookmarks, cookies, login sessions, downloads, or session files.",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            controller.clear_data()
+            QMessageBox.information(self, "Recommendation Data Cleared", "Local recommendation feedback was removed. Browser history and bookmarks were preserved.")
+
     def _advanced(self, layout):
         form = self._page(layout, "Advanced", "Zoom and application preferences")
         self.zoom = QComboBox(); self.zoom.addItems([f"{value}%" for value in BrowserSettings.ZOOMS]); self.zoom.setCurrentText(f"{int(self.settings.default_zoom()*100)}%")
@@ -376,7 +501,7 @@ class SettingsWindow(QDialog):
 
     def _reset(self):
         if QMessageBox.question(self, "Reset Settings", "Reset browser preferences? Cookies, login sessions, history, downloads, and session files will be preserved.") == QMessageBox.StandardButton.Yes:
-            keys = ("appearance/theme", "appearance/accent_color", "appearance/custom_base_color", "appearance/custom_brightness", "appearance/recent_colors", "appearance/toolbar_density", "general/new_tab_behavior", "search/default_provider", "search/custom_template", "web/default_zoom", "downloads/default_directory", "downloads/ask_before_saving", "bookmarks_bar_visible", "appearance/new_tab_shortcuts")
+            keys = ("appearance/theme", "appearance/accent_color", "appearance/custom_base_color", "appearance/custom_brightness", "appearance/recent_colors", "appearance/toolbar_density", "general/new_tab_behavior", "search/default_provider", "search/custom_template", "web/default_zoom", "downloads/default_directory", "downloads/ask_before_saving", "pdf/open_in_browser", "bookmarks_bar_visible", "appearance/new_tab_shortcuts", "recommendations/enabled", "recommendations/source_history", "recommendations/source_bookmarks", "recommendations/show_new_tab", "recommendations/show_continue", "recommendations/show_related")
             for key in keys:
                 self.settings.store.remove(key)
             for key in self.settings.store.allKeys():
@@ -391,5 +516,6 @@ class SettingsWindow(QDialog):
             for window in tuple(MainWindow._all_windows):
                 window.shortcut_manager.reset_defaults()
                 window._browser_settings.changed.emit("web/default_zoom", 100)
+                window._browser_settings.changed.emit("pdf/open_in_browser", True)
                 if not window._is_private: window.bookmarks_bar.hide()
             QMessageBox.information(self, "Settings reset", "Preferences reset to safe defaults. Browser data was preserved.")

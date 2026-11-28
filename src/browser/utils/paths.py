@@ -6,6 +6,15 @@ from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import QApplication
 
 
+def resource_path(relative: str) -> Path:
+    """Resolve bundled read-only assets in development and frozen distributions."""
+    root = Path(__file__).resolve().parents[1]
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("Resource must remain inside the browser package")
+    return path
+
+
 def app_data_directory() -> Path:
     """Return the stable per-user application-data directory."""
     app = QApplication.instance()

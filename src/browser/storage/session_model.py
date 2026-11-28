@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
+import zipfile
 from urllib.parse import parse_qsl
 from uuid import uuid4
 
@@ -178,7 +180,7 @@ class SessionSnapshot:
 
     @staticmethod
     def sanitize_url(value: str) -> str | None:
-        """Allow web and LightMq new-tab URLs; reject credentials and token URLs."""
+        """Allow web/start-page URLs and existing local PDFs; reject unsafe URLs."""
         if len(value) > 8192:
             return None
         url = QUrl(value.strip())
@@ -187,6 +189,25 @@ class SessionSnapshot:
         text = url.toString()
         if text == DEFAULT_START_URL or text == "about:blank":
             return text
+        if url.scheme().lower() == "file":
+            if url.host() not in ("", "localhost") or url.hasQuery() or url.hasFragment():
+                return None
+            local_path = Path(url.toLocalFile())
+            try:
+                suffix = local_path.suffix.lower()
+                if not local_path.is_file() or suffix not in {".pdf", ".xlsx"}:
+                    return None
+                if suffix == ".pdf":
+                    with local_path.open("rb") as document:
+                        if b"%PDF-" not in document.read(1024):
+                            return None
+                elif not zipfile.is_zipfile(local_path):
+                    return None
+            except OSError:
+                return None
+            return QUrl.fromLocalFile(str(local_path.resolve())).toString(
+                QUrl.ComponentFormattingOption.FullyEncoded
+            )
         if url.scheme().lower() not in {"http", "https"} or not url.host():
             return None
         if url.userName() or url.password():

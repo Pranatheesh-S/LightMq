@@ -39,3 +39,16 @@ def test_private_start_page_can_read_but_not_persist_shortcuts(tmp_path):
     assert len(json.loads(bridge.loadShortcuts()))==3
     assert not bridge.saveShortcut("Private","https://example.com",-1)
     assert store.value(bridge.KEY) is None
+
+
+def test_incognito_start_page_never_exposes_recommendation_data(tmp_path):
+    store=QSettings(str(tmp_path/"settings.ini"),QSettings.Format.IniFormat)
+    bridge=NewTabBridge(
+        store,"https://search.brave.com/search?q={searchTerms}",private=True,
+        page=_Page("lightmq://incognito/"),
+    )
+    assert not bridge.recommendationsEnabled()
+    assert json.loads(bridge.loadRecommendations())=={"recommended":[],"related":[],"continue":[]}
+    assert not bridge.hideRecommendation("https://example.com/","Example")
+    assert not bridge.pinRecommendation("https://example.com/",True,"Example")
+    assert not bridge.openRecommendation("https://example.com/",True)

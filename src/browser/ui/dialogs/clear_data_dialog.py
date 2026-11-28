@@ -14,7 +14,7 @@ class ClearDataDialog(QDialog):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("Clear Browsing Data")
-        self.resize(460, 370)
+        self.resize(480, 405)
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -32,6 +32,14 @@ class ClearDataDialog(QDialog):
         self.cb_history = QCheckBox("Browsing history (selected time range)", self)
         self.cb_history.setChecked(True)
         layout.addWidget(self.cb_history)
+        self.cb_keep_recommendation_pins = QCheckBox(
+            "Keep pinned recommendation shortcuts when clearing all history", self,
+        )
+        self.cb_keep_recommendation_pins.setChecked(False)
+        layout.addWidget(self.cb_keep_recommendation_pins)
+        self.period.currentIndexChanged.connect(self._update_recommendation_choice)
+        self.cb_history.toggled.connect(self._update_recommendation_choice)
+        self._update_recommendation_choice()
         self.cb_cookies = QCheckBox("Cookies (all dates; may sign you out)", self)
         self.cb_cookies.setChecked(True)
         layout.addWidget(self.cb_cookies)
@@ -62,6 +70,17 @@ class ClearDataDialog(QDialog):
         return self.cb_history.isChecked()
 
     @property
+    def keep_recommendation_pins(self) -> bool:
+        """Whether the user explicitly chose to retain pinned shortcuts."""
+        return self.cb_keep_recommendation_pins.isEnabled() and self.cb_keep_recommendation_pins.isChecked()
+
+    def _update_recommendation_choice(self, *_args: object) -> None:
+        """Offer pin preservation only when all history is selected for deletion."""
+        self.cb_keep_recommendation_pins.setEnabled(
+            self.cb_history.isChecked() and self.period.currentData() == "all"
+        )
+
+    @property
     def clear_cache(self) -> bool:
         """Whether to request full HTTP-cache clearing."""
         return self.cb_cache.isChecked()
@@ -89,8 +108,15 @@ class ClearDataDialog(QDialog):
     def _confirm(self) -> None:
         """Require explicit consent and explain the actual category scope."""
         selected: list[str] = []
+        explanation = ""
         if self.clear_history:
             selected.append(f"Browsing history ({self.period.currentText().lower()})")
+            if self.period.currentData() == "all":
+                explanation = (
+                    "\n\nPinned recommendation shortcuts will be kept."
+                    if self.keep_recommendation_pins
+                    else "\n\nHistory-derived recommendation feedback and pinned shortcuts will be cleared."
+                )
         if self.clear_cookies:
             selected.append("all cookies (you may be signed out)")
         if self.clear_cache:
@@ -104,7 +130,7 @@ class ClearDataDialog(QDialog):
             self,
             "Confirm data deletion",
             "Clear the following data?\n\n• " + "\n• ".join(selected)
-            + "\n\nCookies and cache are cleared for all dates when selected.",
+            + explanation + "\n\nCookies and cache are cleared for all dates when selected.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )

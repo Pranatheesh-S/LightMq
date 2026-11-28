@@ -98,6 +98,12 @@ class ShortcutManager(QObject):
             "Ctrl+Shift+N", w.new_private_window, "new_private_window", "Windows", "Open private browsing window"
         )
         self.register_shortcut(
+            "Ctrl+O", w.open_file, "open_file", "Browser", "Open a local document"
+        )
+        self.register_shortcut(
+            "Ctrl+Shift+S", w.save_active_document_as, "save_active_document_as", "Page", "Save workbook as"
+        )
+        self.register_shortcut(
             "Ctrl+Tab", w.next_tab, "next_tab", "Tabs", "Switch to next tab"
         )
         self.register_shortcut(
@@ -230,6 +236,15 @@ class ShortcutManager(QObject):
         for action, sequence in bindings.items():
             self._replace_binding(action, sequence)
         return True
+
+    def set_action_enabled(self, action: str, enabled: bool) -> None:
+        """Enable or suspend a registered shortcut without changing its binding."""
+        entry = next((item for item in self._registry if item["action"] == action), None)
+        if entry is None or not entry["normalized"]:
+            return
+        shortcut = self._shortcuts.get(entry["normalized"])
+        if shortcut is not None:
+            shortcut.setEnabled(enabled)
 
     def reset_defaults(self) -> None:
         """Restore all currently registered actions to their original bindings."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtWidgets import QWidget
 from PySide6.QtWebEngineCore import QWebEngineProfile
 
 from browser.core.navigation import normalize_url
@@ -21,10 +22,10 @@ logger = logging.getLogger(__name__)
 class TabManager(QObject):
     """Manage WebView instances, stable IDs, pinning, groups, and tab history."""
 
-    tab_created = Signal(int, WebView)
-    tab_closing = Signal(int, WebView)
+    tab_created = Signal(int, QWidget)
+    tab_closing = Signal(int, QWidget)
     tab_closed = Signal(int)
-    current_changed = Signal(int, WebView)
+    current_changed = Signal(int, QWidget)
     tab_moved = Signal(int, int)
     tab_order_changed = Signal()
     state_changed = Signal()
@@ -41,8 +42,8 @@ class TabManager(QObject):
         self._default_url = default_url
         self._profile = profile
         self._is_private = is_private
-        self._views: list[WebView] = []
-        self._tab_ids: dict[WebView, str] = {}
+        self._views: list[QWidget] = []
+        self._tab_ids: dict[QWidget, str] = {}
         self._pinned_ids: set[str] = set()
         self._current_index = -1
         self.group_manager = TabGroupManager(self)
@@ -66,19 +67,19 @@ class TabManager(QObject):
         """Return the active tab's model index."""
         return self._current_index
 
-    def current_view(self) -> WebView | None:
+    def current_view(self) -> QWidget | None:
         """Return the active view, if one exists."""
         return self.view_at(self._current_index)
 
-    def view_at(self, index: int) -> WebView | None:
+    def view_at(self, index: int) -> QWidget | None:
         """Return a view by model index."""
         return self._views[index] if 0 <= index < len(self._views) else None
 
-    def ordered_views(self) -> tuple[WebView, ...]:
+    def ordered_views(self) -> tuple[QWidget, ...]:
         """Return an immutable view of the authoritative tab order."""
         return tuple(self._views)
 
-    def index_of(self, view: WebView) -> int:
+    def index_of(self, view: QWidget) -> int:
         """Return a view's index or -1 if it is not managed here."""
         try:
             return self._views.index(view)
@@ -89,7 +90,7 @@ class TabManager(QObject):
         """Return the stable tab ID for a managed view."""
         return self._tab_ids.get(view) if view is not None else None
 
-    def view_for_tab_id(self, tab_id: str) -> WebView | None:
+    def view_for_tab_id(self, tab_id: str) -> QWidget | None:
         """Resolve a stable tab ID to its live view."""
         return next((view for view in self._views if self._tab_ids.get(view) == tab_id), None)
 
@@ -156,6 +157,29 @@ class TabManager(QObject):
         logger.info("Created browser tab at index %d", new_index)
         return view
 
+    def create_document_tab(
+        self, widget: QWidget, url: QUrl, title: str, *, activate: bool = True,
+        tab_id: str | None = None, pinned: bool = False, group_id: str | None = None,
+    ) -> QWidget:
+        """Insert a native document widget into the shared tab lifecycle."""
+        actual_id = tab_id if tab_id and tab_id not in self._tab_ids.values() else None
+        actual_id = actual_id or SessionSnapshot.new_tab_id()
+        self._tab_ids[widget] = actual_id
+        widget.restored_title = title
+        if pinned:
+            self._pinned_ids.add(actual_id)
+        self._views.append(widget)
+        if group_id and not pinned and self.group_manager.group(group_id) is not None:
+            self.group_manager.add_tab(group_id, actual_id)
+        self._normalize_order()
+        index = self._views.index(widget)
+        self.tab_created.emit(index, widget)
+        self.count_changed.emit(len(self._views))
+        if activate or len(self._views) == 1:
+            self.set_current_index(index)
+        self.state_changed.emit()
+        return widget
+
     def pin_tab(self, view: WebView) -> bool:
         """Pin a tab, ungrouping it and moving it before every regular tab."""
         tab_id = self.tab_id_for(view)
@@ -182,7 +206,7 @@ class TabManager(QObject):
     def duplicate_tab(self, index: int) -> WebView | None:
         """Duplicate the current URL immediately after its source tab."""
         source = self.view_at(index)
-        if source is None:
+        if not isinstance(source, WebView):
             return None
         source_id = self.tab_id_for(source)
         group_id = self.group_manager.group_id_for_tab(source_id)
@@ -319,7 +343,7 @@ class TabManager(QObject):
         view = self.view_at(index)
         if view is None or (self.is_pinned(view) and not force):
             return False
-        if record_closed and not self._is_private:
+        if record_closed and not self._is_private and isinstance(view, WebView):
             url = view.url()
             if url.isValid() and not url.isEmpty() and url.toString() != "about:blank":
                 tab_id = self.tab_id_for(view)
@@ -347,10 +371,11 @@ class TabManager(QObject):
             self._current_index -= 1
         self.count_changed.emit(len(self._views))
         self.state_changed.emit()
-        try:
-            view.stop()
-        except RuntimeError:
-            pass
+        if isinstance(view, WebView):
+            try:
+                view.stop()
+            except RuntimeError:
+                pass
         view.deleteLater()
         logger.info("Closed browser tab; %d tabs remain", len(self._views))
         return True
@@ -371,8 +396,9 @@ class TabManager(QObject):
                 self.group_manager.remove_tab(tab_id)
                 self._pinned_ids.discard(tab_id)
             self.tab_closed.emit(index)
-            try:view.stop()
-            except RuntimeError:pass
+            if isinstance(view, WebView):
+                try:view.stop()
+                except RuntimeError:pass
             view.deleteLater()
         self._current_index=-1
         self.group_manager.clear_membership()

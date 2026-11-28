@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from browser.utils.paths import resource_path
 
 from PySide6.QtGui import QGuiApplication
 
@@ -77,7 +77,7 @@ class ThemeManager:
         """Reuse the existing mode stylesheet, then apply current token values."""
         stylesheet_mode=dark
         filename="dark.qss" if stylesheet_mode else "light.qss"
-        path=Path(__file__).parent/"themes"/filename
+        path=resource_path("ui/themes/" + filename)
         original=path.read_text(encoding="utf-8") if path.exists() else ""
         if mode!="custom":
             base_color=self.settings.ACCENTS[self.settings.accent()]

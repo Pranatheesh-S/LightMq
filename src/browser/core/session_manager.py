@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import zipfile
+import openpyxl
+from collections.abc import Callable
+
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 
 from browser.core.tab_manager import TabManager
 from browser.storage.session_model import SessionGroup, SessionSnapshot, SessionTab
 from browser.storage.session_repository import SessionRepository
 from browser.webengine.web_view import WebView
+from PySide6.QtWidgets import QWidget
 
 class SessionManager(QObject):
     """Coordinate a normal browser window's session lifecycle."""
 
     save_failed = Signal(str)
+    restore_warning = Signal(str)
     SAVE_DEBOUNCE_MS = 700
     RECOVERY_INTERVAL_MS = 60_000
 
@@ -27,6 +33,7 @@ class SessionManager(QObject):
         self._suspended = False
         self._started = False
         self._restored = False
+        self.document_factory: Callable[[str], QWidget] | None = None
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(self.SAVE_DEBOUNCE_MS)
@@ -52,8 +59,11 @@ class SessionManager(QObject):
         tab_manager.group_manager.state_changed.connect(self.schedule_save)
         for index in range(tab_manager.count()):
             view = tab_manager.view_at(index)
-            if view is not None:
+            if isinstance(view, WebView):
                 self._watch_view(view)
+            elif view is not None and hasattr(view, "urlChanged"):
+                view.urlChanged.connect(lambda _url: self.schedule_save())
+                view.titleChanged.connect(lambda _title: self.schedule_save())
 
     def restore(self, snapshot: SessionSnapshot) -> int:
         """Restore valid tab metadata using the existing TabManager API."""
@@ -61,7 +71,7 @@ class SessionManager(QObject):
             return 0
         self._restored = True
         self._suspended = True
-        restored: list[tuple[str, WebView]] = []
+        restored: list[tuple[str, QWidget]] = []
         try:
             group_manager = self._tab_manager.group_manager
             group_manager.restore_groups([
@@ -72,13 +82,24 @@ class SessionManager(QObject):
             for tab in snapshot.tabs:
                 url = SessionSnapshot.sanitize_url(tab.url)
                 if url is None:
+                    if tab.url.lower().endswith(".xlsx"):
+                        self.restore_warning.emit(f"Workbook not restored because it is missing or invalid: {tab.title or tab.url}")
                     continue
                 try:
-                    view = self._tab_manager.create_tab(
-                        QUrl(url), activate=False, tab_id=tab.tab_id, tab_title=tab.title,
-                        pinned=tab.pinned, group_id=tab.group_id,
-                    )
-                except (TypeError, ValueError):
+                    parsed = QUrl(url)
+                    if parsed.scheme() == "file" and parsed.toLocalFile().lower().endswith(".xlsx"):
+                        if self.document_factory is None:
+                            continue
+                        widget = self.document_factory(parsed.toLocalFile())
+                        view = self._tab_manager.create_document_tab(widget, parsed, tab.title, activate=False, tab_id=tab.tab_id, pinned=tab.pinned, group_id=tab.group_id)
+                    else:
+                        view = self._tab_manager.create_tab(
+                            parsed, activate=False, tab_id=tab.tab_id, tab_title=tab.title,
+                            pinned=tab.pinned, group_id=tab.group_id,
+                        )
+                except (TypeError, ValueError, OSError, zipfile.BadZipFile, openpyxl.utils.exceptions.InvalidFileException) as exc:
+                    if tab.url.lower().endswith(".xlsx"):
+                        self.restore_warning.emit(f"Workbook could not be restored: {tab.title or tab.url} ({exc})")
                     continue
                 restored.append((tab.tab_id, view))
             group_manager.clear_membership()
@@ -114,11 +135,17 @@ class SessionManager(QObject):
                 view = manager.view_at(index)
                 if view is None:
                     continue
-                url = SessionSnapshot.sanitize_url(view.url().toString())
+                if isinstance(view, WebView):
+                    raw_url = view.url().toString()
+                    raw_title = view.title() or getattr(view, "restored_title", "")
+                else:
+                    raw_url = view.url().toString()
+                    raw_title = view.title()
+                url = SessionSnapshot.sanitize_url(raw_url)
                 if url is None:
                     continue
                 tab_id = manager.tab_id_for(view)
-                title = view.title() or getattr(view, "restored_title", "")
+                title = raw_title
                 group_id = manager.group_manager.group_id_for_tab(tab_id)
                 tabs.append(SessionTab(tab_id, url, title, index, manager.is_pinned(view), group_id))
             active_view = manager.current_view()
@@ -152,11 +179,15 @@ class SessionManager(QObject):
             return False
         return self.repository.mark_clean_shutdown()
 
-    def _on_tab_created(self, _index: int, view: WebView) -> None:
-        self._watch_view(view)
+    def _on_tab_created(self, _index: int, view: QWidget) -> None:
+        if isinstance(view, WebView):
+            self._watch_view(view)
+        elif hasattr(view, "urlChanged"):
+            view.urlChanged.connect(lambda _url: self.schedule_save())
+            view.titleChanged.connect(lambda _title: self.schedule_save())
         self.schedule_save()
 
-    def _on_current_changed(self, _index: int, _view: WebView) -> None:
+    def _on_current_changed(self, _index: int, _view: QWidget) -> None:
         self.schedule_save()
 
     def _on_tab_moved(self, _from_index: int, _to_index: int) -> None:

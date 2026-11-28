@@ -5,10 +5,16 @@ interaction policies.
 """
 
 from collections.abc import Callable
+from email.message import Message
 import logging
 import weakref
+from pathlib import Path
 from PySide6.QtCore import QObject, QUrl, Signal
-from PySide6.QtWebEngineCore import QWebEngineCertificateError, QWebEnginePage
+from PySide6.QtWebEngineCore import (
+    QWebEngineCertificateError,
+    QWebEngineLoadingInfo,
+    QWebEnginePage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +24,7 @@ class WebPage(QWebEnginePage):
 
     main_frame_navigation_requested = Signal(str, str)
     console_message = Signal(str, str, int, str)
+    pdf_document_changed = Signal(bool)
 
     def __init__(self, profile=None, parent: QObject | None = None):
         if profile is not None:
@@ -32,6 +39,57 @@ class WebPage(QWebEnginePage):
         self._close_popup_after_download = False
         self._download_handled = False
         self._last_main_frame_navigation_url = QUrl()
+        self._is_pdf_document = False
+        self._pdf_display_title = ""
+        self.loadingChanged.connect(self._on_loading_changed)
+
+    def is_pdf_document(self) -> bool:
+        """Return whether the current main-frame document is a PDF viewer page."""
+        return self._is_pdf_document
+
+    def pdf_display_title(self) -> str:
+        """Return a safe PDF filename for the browser tab, when known."""
+        return self._pdf_display_title
+
+    def _set_pdf_document(self, is_pdf: bool) -> None:
+        if self._is_pdf_document == is_pdf:
+            return
+        self._is_pdf_document = is_pdf
+        self.pdf_document_changed.emit(is_pdf)
+
+    def _on_loading_changed(self, info: QWebEngineLoadingInfo) -> None:
+        """Identify PDF responses by MIME type, including URLs without extensions."""
+        status = getattr(info.status(), "name", "")
+        if status == "LoadStartedStatus":
+            self._pdf_display_title = ""
+            self._set_pdf_document(False)
+            return
+        if status != "LoadSucceededStatus" or (hasattr(info, "isDownload") and info.isDownload()):
+            self._set_pdf_document(False)
+            return
+
+        headers: dict[str, str] = {}
+        try:
+            for key, values in info.responseHeaders().items():
+                if values:
+                    headers[key.toStdString().lower()] = values[0].toStdString()
+        except (AttributeError, RuntimeError, TypeError):
+            headers = {}
+
+        url = info.url()
+        is_local_pdf = url.isLocalFile() and url.path().lower().endswith(".pdf")
+        content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        is_pdf = content_type == "application/pdf" or is_local_pdf
+        self._pdf_display_title = ""
+        if is_pdf:
+            disposition = Message()
+            raw_disposition = headers.get("content-disposition", "")
+            if raw_disposition:
+                disposition["Content-Disposition"] = raw_disposition
+            raw_name = disposition.get_filename() or url.fileName()
+            if raw_name:
+                self._pdf_display_title = Path(raw_name.replace("\\", "/")).name[:200]
+        self._set_pdf_document(is_pdf)
 
     def acceptNavigationRequest(
         self,

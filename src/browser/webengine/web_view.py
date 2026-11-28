@@ -9,7 +9,7 @@ import json
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QWidget
-from PySide6.QtWebEngineCore import QWebEngineProfile
+from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 
@@ -32,13 +32,24 @@ class WebView(QWebEngineView):
         self.setPage(self._custom_page)
         self._custom_page.main_frame_navigation_requested.connect(self._on_main_frame_navigation)
 
-    def configure_start_page(self,settings,search_template:str,theme,private:bool=False)->None:
+    def configure_start_page(self,settings,search_template:str,theme,private:bool=False,recommendations=None,context_url:str="",context_title:str="")->None:
         """Install the narrow bridge used only by LightMq's internal start page."""
         self._search_template=search_template;self._start_page_theme=theme
-        self._new_tab_bridge=NewTabBridge(settings,search_template,private,page=self._custom_page,parent=self._custom_page)
+        self._new_tab_bridge=NewTabBridge(settings,search_template,private,page=self._custom_page,parent=self._custom_page,recommendations=recommendations)
+        self._new_tab_bridge.set_context(context_url,context_title)
         self._web_channel=QWebChannel(self._custom_page)
         self._web_channel.registerObject("lightmq",self._new_tab_bridge)
         self._custom_page.setWebChannel(self._web_channel)
+
+    def set_pdf_viewer_enabled(self, enabled: bool) -> None:
+        """Configure Qt's internal PDF viewer on this page before navigation.
+
+        Qt WebEngine requires plugin support for its built-in PDF renderer. The
+        view setting is deliberately scoped to this WebView and profile context.
+        """
+        settings = self.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.PdfViewerEnabled, enabled)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, enabled)
 
     def update_start_page_theme(self,theme,search_template:str|None=None)->None:
         """Update the built-in start page colors without reloading the page."""

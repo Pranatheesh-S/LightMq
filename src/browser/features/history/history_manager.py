@@ -46,6 +46,29 @@ class HistoryManager(QObject):
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
+    @property
+    def storage_path(self) -> Path:
+        """Expose the database path to features sharing browser metadata storage."""
+        return self._storage_path
+
+    def recommendation_candidates(self, limit: int = 500) -> list[dict]:
+        """Read a bounded summary pool for the local recommendation worker."""
+        bounded = max(1, min(int(limit), 1000))
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT u.url,u.title,u.favicon,"
+                "(SELECT COUNT(*) FROM history_visits v WHERE v.url_id=u.id "
+                "AND lower(v.visit_type) NOT IN ('reload','redirect')) AS visit_count,"
+                "(SELECT MAX(v.visited_at) FROM history_visits v WHERE v.url_id=u.id "
+                "AND lower(v.visit_type) NOT IN ('reload','redirect')) AS last_visit_at "
+                "FROM history_urls u WHERE u.visit_count>0 AND EXISTS "
+                "(SELECT 1 FROM history_visits v WHERE v.url_id=u.id "
+                "AND lower(v.visit_type) NOT IN ('reload','redirect')) "
+                "ORDER BY last_visit_at DESC,visit_count DESC LIMIT ?",
+                (bounded,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def _initialize(self) -> None:
         """Create or migrate the history schema."""
         with self._connect() as connection:

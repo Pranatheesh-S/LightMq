@@ -14,8 +14,12 @@ __pycache__/
 # Build
 build/
 dist/
+.build-venv/
+release/
 *.egg-info/
 
 # IDE
 .idea/
 .vscode/
+
+/build-output.log

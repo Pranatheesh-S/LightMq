@@ -7,7 +7,9 @@ import PySide6
 from browser.webengine.web_profile import WebProfileManager
 
 APP_NAME = "LightMq Browser"
-APP_VERSION = "0.1.0"
+from browser.version import __version__
+
+APP_VERSION = __version__
 DEFAULT_START_URL = "lightmq://newtab"
 
 
